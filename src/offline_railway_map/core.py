@@ -12,6 +12,7 @@ import webbrowser
 from urllib.parse import urlsplit
 
 from . import APP_NAME, __version__
+from .cells import CellService
 from .coverage import CellCoverage
 from .events import EventBus, frame
 from .net import Http, NetStatus
@@ -19,6 +20,7 @@ from .online_tiles import OnlineTiles
 from .paths import Home, web_dir
 from .server import LocalServer, Request, Response, Router, error_response, json_response
 from .settings import Settings
+from .store import StateStore
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ class AppCore:
         self.status = NetStatus(self.events)
         self.coverage = CellCoverage()
         self.online = OnlineTiles(home, self.http, self.status, self.coverage, lambda: self.settings.online_cache_limit_mb)
+        self.store = StateStore(home)
+        self.cells = CellService(home, self.store, self.coverage, self.events)
 
         self.router = Router()
         self.server = LocalServer(self.router, web_dir(), port=port)
@@ -59,6 +63,7 @@ class AppCore:
 
     def start(self) -> str:
         """Start serving; return the URL of the page."""
+        self.cells.start()
         self.server.start()
         self.online_server.start()
         self.online_server.cors_origin = self.server.origin
@@ -73,6 +78,7 @@ class AppCore:
         self.server.stop()
         self.online_server.stop()
         self.online.close()
+        self.store.close()
         self.settings.save_if_data_exists(self.home)
 
     # -- routes ----------------------------------------------------------------------
@@ -84,6 +90,13 @@ class AppCore:
         add("POST", "/api/open-external", self._api_open_external)
         add("POST", "/api/fatal", self._api_fatal)
         add("GET", "/api/events", self._api_events)
+        add("GET", "/api/cells", lambda _req: json_response(self.cells.snapshot()))
+        add("POST", "/api/cells/apply", self._api_cells_apply)
+        add("POST", "/api/cells/delete", self._api_cells_delete)
+        add("POST", "/api/cells/retry", self._api_cells_retry)
+        add("POST", "/api/cells/update", self._api_cells_update)
+        add("POST", "/api/cells/update-all", lambda _req: json_response({"count": self.cells.update_all_rail()}))
+        add("POST", "/api/downloads/pause", self._api_pause)
         self.online_router.add(
             "GET", r"/tiles/(?P<source>osm|orm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.png", self._tile_online
         )
@@ -126,8 +139,56 @@ class AppCore:
         self.hooks.fatal(reason)
         return json_response({"ok": True})
 
+    @staticmethod
+    def _ids(data, key: str = "ids") -> list[str]:
+        value = (data or {}).get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"{key} must be a list of cell ids")
+        return value
+
+    def _api_cells_apply(self, req: Request) -> Response:
+        data = req.json() or {}
+        try:
+            add, remove = self._ids(data, "add"), self._ids(data, "remove")
+            center = data.get("center")
+            center_xy = (float(center["lon"]), float(center["lat"])) if center else None
+            result = self.cells.apply(add, remove, center_xy)
+        except (ValueError, KeyError, TypeError) as exc:
+            return error_response(400, str(exc))
+        return json_response({**result, **self.cells.snapshot()})
+
+    def _api_cells_delete(self, req: Request) -> Response:
+        try:
+            removed = self.cells.delete(self._ids(req.json()))
+        except ValueError as exc:
+            return error_response(400, str(exc))
+        return json_response({"removed": removed})
+
+    def _api_cells_retry(self, req: Request) -> Response:
+        try:
+            queued = self.cells.retry(self._ids(req.json()))
+        except ValueError as exc:
+            return error_response(400, str(exc))
+        return json_response({"queued": queued})
+
+    def _api_cells_update(self, req: Request) -> Response:
+        data = req.json() or {}
+        try:
+            ok = self.cells.request_update(str(data.get("id", "")), bool(data.get("basemap")))
+        except ValueError as exc:
+            return error_response(400, str(exc))
+        return json_response({"ok": ok}) if ok else error_response(409, "cell is not cached")
+
+    def _api_pause(self, req: Request) -> Response:
+        self.cells.set_paused(bool((req.json() or {}).get("paused")))
+        return json_response({"paused": self.cells.paused})
+
     def _api_events(self, _req: Request) -> Response:
-        initial = [frame("hello", {"version": __version__}), frame("status", self.status.snapshot())]
+        initial = [
+            frame("hello", {"version": __version__}),
+            frame("status", self.status.snapshot()),
+            frame("cells", self.cells.snapshot()),
+        ]
         return Response(
             200,
             content_type="text/event-stream; charset=utf-8",

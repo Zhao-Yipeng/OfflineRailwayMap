@@ -1,8 +1,9 @@
 // Page entry point.
 import { api, setOnlineOrigin, subscribe } from './api.js';
-import { addGroupMarkers, addOnlineLayers } from './layers.js';
+import { Cells, renderDownloadPanel } from './grid.js';
+import { addGroupMarkers, addOnlineLayers, refreshOnlineLayers } from './layers.js';
 import { createMap } from './map.js';
-import { $, attachScale, renderAttribution, renderStatus, showFatal } from './ui.js';
+import { $, attachScale, renderAttribution, renderStatus, showFatal, toast } from './ui.js';
 
 function hasWebGL2() {
   try {
@@ -23,6 +24,25 @@ function rememberView(map) {
   });
 }
 
+function setupModeButton(cells) {
+  const button = $('btn-mode');
+  button.disabled = false;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      if (cells.mode === 'edit') {
+        if (await cells.applyEdits()) cells.setMode('browse');
+      } else {
+        cells.setMode('edit');
+      }
+    } catch (err) {
+      toast(`操作失败：${err.message}`, 'error');
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
 async function boot() {
   if (!hasWebGL2()) {
     showFatal('显卡不支持 WebGL 2，地图无法显示。请更新显卡驱动后重试。');
@@ -37,17 +57,35 @@ async function boot() {
   renderStatus(info.status);
   attachScale(map);
   rememberView(map);
+  $('btn-clear').disabled = true;
+
+  await new Promise((resolve) => map.on('load', resolve));
+  addGroupMarkers(map);
+  addOnlineLayers(map);
+
+  const cells = new Cells(map, {
+    showOutline: info.settings.showCachedOutline,
+    onModeChange: (mode) => {
+      $('btn-mode').textContent = mode === 'edit' ? '开始浏览' : '编辑方格';
+      document.body.dataset.mode = mode;
+      renderDownloadPanel(cells);
+    },
+  });
+  window.__cells = cells;
+  const snapshot = await api.get('/api/cells');
+  cells.setSnapshot(snapshot);
+  cells.setMode(cells.hasAnyCells ? 'browse' : 'edit');
+  setupModeButton(cells);
+  renderDownloadPanel(cells);
+
   subscribe({
     hello: () => { document.body.dataset.connected = 'true'; },
     status: renderStatus,
+    cells: (snap) => { cells.setSnapshot(snap); renderDownloadPanel(cells); },
+    cell: (row) => { cells.updateCell(row); renderDownloadPanel(cells); },
+    tiles: ({ version }) => refreshOnlineLayers(map, version),
   });
-  map.on('load', () => {
-    addGroupMarkers(map);
-    addOnlineLayers(map);
-    document.body.dataset.mapReady = 'true';
-  });
-  $('btn-mode').disabled = true;
-  $('btn-clear').disabled = true;
+  document.body.dataset.mapReady = 'true';
 }
 
 boot().catch((err) => {

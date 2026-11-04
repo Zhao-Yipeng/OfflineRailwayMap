@@ -15,6 +15,7 @@
 }
 
 html, body { margin: 0; height: 100%; overflow: hidden; }
+[hidden] { display: none !important; }
 #map { position: absolute; inset: 0; background: #e8e8e8; }
 #ui { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 #ui > * { pointer-events: none; }
@@ -71,6 +72,20 @@ button.link { background: none; border: none; box-shadow: none; padding: 0; colo
 .legend { position: absolute; top: 52px; right: 12px; max-height: calc(100% - 160px); overflow: auto; padding: 8px 12px; font-size: 12px; pointer-events: auto; }
 .download-panel { position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; padding: 8px 12px; min-width: 360px; max-width: 46vw; pointer-events: auto; }
 .edit-bar { position: absolute; left: 50%; transform: translateX(-50%); top: 12px; padding: 6px 12px; pointer-events: auto; }
+
+.edit-bar { display: flex; gap: 12px; align-items: baseline; white-space: nowrap; }
+.edit-bar .hint { color: var(--muted); font-size: 12px; }
+.download-panel { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.download-panel button { padding: 2px 10px; box-shadow: none; }
+.download-panel .strong { font-weight: 600; }
+.download-panel .failed { color: var(--danger); }
+.cell-tip { position: absolute; z-index: 5; padding: 3px 8px; font-size: 12px; pointer-events: none; white-space: nowrap; }
+.select-box { position: absolute; border: 2px dashed #0969da; background: rgba(9, 105, 218, 0.12); pointer-events: none; }
+.select-box.remove { border-color: #cf222e; background: rgba(207, 34, 46, 0.12); }
+.context-menu { position: fixed; z-index: 9; display: flex; flex-direction: column; min-width: 180px; padding: 4px 0; }
+.context-menu .menu-title { padding: 4px 12px; font-size: 12px; color: var(--muted); }
+.context-menu button { border: none; box-shadow: none; border-radius: 0; text-align: left; background: transparent; padding: 6px 12px; }
+.context-menu button:hover { background: #f3f4f6; }
 
 #modal-root:empty { display: none; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; z-index: 10; }

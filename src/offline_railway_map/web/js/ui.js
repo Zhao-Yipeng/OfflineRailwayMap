@@ -3,6 +3,18 @@ import { openExternal } from './api.js';
 
 export const $ = (id) => document.getElementById(id);
 
+export function formatBytes(bytes) {
+  if (!bytes) return '0 MB';
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  return `${(bytes / 1e6).toFixed(1)} MB`;
+}
+
+export function formatDate(seconds) {
+  const d = new Date(seconds * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
