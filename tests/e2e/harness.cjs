@@ -47,7 +47,7 @@ const OFFLINE_DOWNLOADS = [
   '',
 ].join('\n');
 
-async function openPage({ homeDir, viewport = { width: 1280, height: 800 }, env, settings } = {}) {
+async function openPage({ homeDir, viewport = { width: 1280, height: 800 }, env, settings, scale = 1 } = {}) {
   const home = homeDir || fs.mkdtempSync(path.join(os.tmpdir(), 'orm-e2e-'));
   if (settings) {
     fs.mkdirSync(path.join(home, 'data'), { recursive: true });
@@ -55,7 +55,7 @@ async function openPage({ homeDir, viewport = { width: 1280, height: 800 }, env,
   }
   const backend = await startBackend(home, env);
   const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
-  const page = await browser.newPage({ viewport, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport, deviceScaleFactor: scale });
   const problems = [];
   page.on('console', (msg) => { if (msg.type() === 'error') problems.push(`console: ${msg.text()}`); });
   page.on('pageerror', (err) => problems.push(`pageerror: ${err.message}`));

@@ -44,6 +44,20 @@ function describe(line, railAt) {
   );
 }
 
+// One line of the chooser: what the line is, then what tells it apart from its neighbours.
+function lineLabel(line) {
+  const t = line.tags || {};
+  const type = [STATES[line.state] || '', KINDS[line.kind] || ''].join('');
+  const name = t.name || t.ref || type || `线路 ${line.id}`;
+  const extra = [
+    t.name && t.ref ? t.ref : null,
+    SERVICES[line.service] || null,
+    t['railway:track_ref'] ? `${t['railway:track_ref']} 道` : null,
+    line.speedLabel ? `${line.speedLabel} km/h` : '无速度信息',
+  ].filter(Boolean);
+  return `${name} · ${extra.join(' · ')}`;
+}
+
 function chooser(lines, pick) {
   return el('div', { class: 'details' },
     el('div', { class: 'details-title' }, `此处有 ${lines.length} 条线路`),
@@ -58,6 +72,10 @@ export function setupDetails(map, cells) {
     if (popup) popup.remove();
     popup = new maplibregl.Popup({ maxWidth: '380px', className: 'details-popup' }).setLngLat(lngLat).setDOMContent(node).addTo(map);
   };
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && popup) { popup.remove(); popup = null; }
+  });
 
   map.on('click', async (e) => {
     if (cells.mode !== 'browse') return;
@@ -80,8 +98,13 @@ export function setupDetails(map, cells) {
         };
         if (seen.size === 1) await load([...seen.keys()][0]);
         else {
-          const lines = [...seen.values()].map((f) => ({ id: f.id, label: f.properties.lb ? `速度 ${f.properties.lb}` : `线路 ${f.id}` }));
-          show(e.lngLat, chooser(lines, (line) => load(line.id)));
+          // Local and fast: fetch every candidate so the list can name them.
+          const infos = await Promise.all([...seen.keys()].slice(0, 20)
+            .map((id) => api.get(`/api/details?cell=${cid}&way=${id}`).catch(() => null)));
+          const lines = infos.filter(Boolean).map((info) => ({ id: info.id, label: lineLabel(info), info }));
+          if (request !== pending || !lines.length) return;
+          if (lines.length === 1) show(e.lngLat, describe(lines[0].info, lines[0].info.railAt));
+          else show(e.lngLat, chooser(lines, (line) => show(e.lngLat, describe(line.info, line.info.railAt))));
         }
         return;
       }
@@ -96,7 +119,7 @@ export function setupDetails(map, cells) {
       const result = await api.get(`/api/details/online?lon=${e.lngLat.lng}&lat=${e.lngLat.lat}&radius=${radius.toFixed(0)}`);
       if (request !== pending || !result.lines.length) return;
       if (result.lines.length === 1) show(e.lngLat, describe(result.lines[0], null));
-      else show(e.lngLat, chooser(result.lines.map((l) => ({ id: l.id, label: l.tags.name || l.speedLabel || `线路 ${l.id}`, line: l })),
+      else show(e.lngLat, chooser(result.lines.map((l) => ({ id: l.id, label: lineLabel(l), line: l })),
         (pick) => show(e.lngLat, describe(result.lines.find((l) => l.id === pick.id), null))));
     } catch (err) {
       if (request === pending) toast(err.message, 'error');
