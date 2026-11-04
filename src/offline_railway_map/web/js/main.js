@@ -1,8 +1,10 @@
 // Page entry point.
 import { api, setOnlineOrigin, subscribe } from './api.js';
+import { addBasemap, loadBasemapStyle, refreshBasemap, setBasemapMaxzoom } from './basemap.js';
 import { Cells, renderDownloadPanel } from './grid.js';
 import { addGroupMarkers, addOnlineLayers, refreshOnlineLayers } from './layers.js';
 import { createMap } from './map.js';
+import { addRailLayers, refreshRailLayers } from './rail.js';
 import { $, attachScale, renderAttribution, renderStatus, showFatal, toast } from './ui.js';
 
 function hasWebGL2() {
@@ -59,9 +61,15 @@ async function boot() {
   rememberView(map);
   $('btn-clear').disabled = true;
 
-  await new Promise((resolve) => map.on('load', resolve));
+  const [snapshot] = await Promise.all([
+    api.get('/api/cells'),
+    loadBasemapStyle(),
+    new Promise((resolve) => map.on('load', resolve)),
+  ]);
   addGroupMarkers(map);
+  addBasemap(map, snapshot.basemapMaxzoom);
   addOnlineLayers(map);
+  addRailLayers(map);
 
   const cells = new Cells(map, {
     showOutline: info.settings.showCachedOutline,
@@ -72,7 +80,6 @@ async function boot() {
     },
   });
   window.__cells = cells;
-  const snapshot = await api.get('/api/cells');
   cells.setSnapshot(snapshot);
   cells.setMode(cells.hasAnyCells ? 'browse' : 'edit');
   setupModeButton(cells);
@@ -81,9 +88,17 @@ async function boot() {
   subscribe({
     hello: () => { document.body.dataset.connected = 'true'; },
     status: renderStatus,
-    cells: (snap) => { cells.setSnapshot(snap); renderDownloadPanel(cells); },
+    cells: (snap) => {
+      cells.setSnapshot(snap);
+      setBasemapMaxzoom(map, snap.basemapMaxzoom);
+      renderDownloadPanel(cells);
+    },
     cell: (row) => { cells.updateCell(row); renderDownloadPanel(cells); },
-    tiles: ({ version }) => refreshOnlineLayers(map, version),
+    tiles: ({ version }) => {
+      refreshOnlineLayers(map, version);
+      refreshRailLayers(map, version);
+      refreshBasemap(map, version);
+    },
   });
   document.body.dataset.mapReady = 'true';
 }

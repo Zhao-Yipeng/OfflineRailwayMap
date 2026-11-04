@@ -63,7 +63,8 @@ def hooks() -> RecordingHooks:
 
 @pytest.fixture
 def core(home, hooks):
-    app = AppCore(home, Settings(), hooks=hooks)
+    # No background downloads (they would contact real Overpass servers).
+    app = AppCore(home, Settings(), hooks=hooks, downloads=False)
     app.start()
     yield app
     app.shutdown()

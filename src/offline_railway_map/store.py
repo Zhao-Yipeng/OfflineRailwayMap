@@ -207,6 +207,50 @@ class StateStore:
         )
         return self._row(rows[0]) if rows else None
 
+    # -- Overpass usage (SPEC §9.2) ----------------------------------------------------------
+
+    @staticmethod
+    def _today() -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def usage_today(self, endpoint: str) -> tuple[int, int]:
+        rows = self._read("SELECT requests, bytes FROM usage WHERE endpoint=? AND day=?", (endpoint, self._today()))
+        return (rows[0][0], rows[0][1]) if rows else (0, 0)
+
+    def add_usage(self, endpoint: str, requests: int, size: int) -> None:
+        day = self._today()
+        with self.write() as conn:
+            conn.execute(
+                "INSERT INTO usage (endpoint, day, requests, bytes) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(endpoint, day) DO UPDATE SET requests = requests + excluded.requests, "
+                "bytes = bytes + excluded.bytes",
+                (endpoint, day, requests, size),
+            )
+            conn.execute("DELETE FROM usage WHERE day < ?", (time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400)),))
+
+    # -- station index (SPEC §6.7) -----------------------------------------------------------
+
+    def replace_stations(self, cell_id: str, rows: list[tuple[str, int, str, str, float, float]]) -> None:
+        """rows: (osm_type, osm_id, kind, name, lon, lat)."""
+        with self.write() as conn:
+            conn.execute("DELETE FROM stations WHERE cell=?", (cell_id,))
+            conn.executemany(
+                "INSERT INTO stations (cell, osm_type, osm_id, kind, name, lon, lat) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(cell_id, *row) for row in rows],
+            )
+
+    def search_stations(self, text: str, limit: int = 20) -> list[dict]:
+        needle = text.strip().lower()
+        if not needle:
+            return []
+        rows = self._read(
+            "SELECT cell, osm_type, osm_id, kind, name, lon, lat FROM stations "
+            "WHERE instr(lower(name), ?) > 0 ORDER BY length(name), name LIMIT ?",
+            (needle, limit),
+        )
+        keys = ("cell", "osmType", "osmId", "kind", "name", "lon", "lat")
+        return [dict(zip(keys, row)) for row in rows]
+
     def reset_interrupted(self) -> None:
         """After a restart, cells that were mid-download go back to the queue."""
         if not self.exists:

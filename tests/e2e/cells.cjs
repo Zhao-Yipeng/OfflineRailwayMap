@@ -1,10 +1,10 @@
 // M2 check: edit mode on first start, click and Shift+drag selection, undo,
 // "开始浏览" queues the cells and switches to browse mode, "编辑方格" goes back.
-const { openPage } = require('./harness.cjs');
+const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
 
 (async () => {
   const [shotEdit, shotBrowse] = process.argv.slice(2);
-  const { page, problems, close } = await openPage();
+  const { page, problems, close } = await openPage({ settings: OFFLINE_DOWNLOADS });
   const expect = (cond, msg) => { if (!cond) problems.push(msg); };
   try {
     await page.waitForSelector('body[data-map-ready="true"]', { timeout: 30000 });
@@ -47,7 +47,7 @@ const { openPage } = require('./harness.cjs');
     await page.waitForSelector('body[data-mode="browse"]', { timeout: 5000 });
     expect((await page.textContent('#btn-mode')) === '编辑方格', 'mode button says 编辑方格');
     const cells = await page.evaluate(async () => (await (await fetch(`${location.pathname.split('/app/')[0]}/api/cells`)).json()).cells);
-    expect(cells.length === 1 && cells[0].status === 'queued', `one queued cell: ${JSON.stringify(cells)}`);
+    expect(cells.length === 1 && ['queued', 'downloading'].includes(cells[0].status), `one queued cell: ${JSON.stringify(cells)}`);
     await page.waitForSelector('#download-panel:not([hidden])', { timeout: 5000 });
     expect((await page.textContent('#download-panel')).includes('下载中'), 'download panel shows the queue');
     await page.waitForFunction(() => {

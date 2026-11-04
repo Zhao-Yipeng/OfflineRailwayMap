@@ -12,6 +12,7 @@ function baseStyle() {
   return {
     version: 8,
     glyphs: url('/app/vendor/fonts/{fontstack}/{range}.pbf'),
+    sprite: url('/app/vendor/sprites/v4/grayscale'),
     sources: {},
     layers: [
       { id: 'background', type: 'background', paint: { 'background-color': '#e8e8e8' } },

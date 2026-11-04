@@ -439,7 +439,7 @@ usage 和 service 取 `usage` 和 `service` 标签。如果没有，并且状态
 2. 只有 S：标「S」。
 3. S 和 F 或 B 同时存在：不标注（矛盾）。
 4. P = forward：标「F (B)」。
-5. P = backward：标「B (F)」。
+5. P = backward：同样标「F (B)」。ORM 的两个函数对这种情况各交换了一次正反方向，结果与 forward 相同；本程序照此实现，与网页版保持一致。注意此时着色速度是 B（见 8.3）。
 6. P = both 或没有 P：标「F/B」。
 7. P 为其他值：只标「F」；F 不存在时不标注。
 
@@ -925,7 +925,7 @@ OfflineRailwayMap\                       程序文件夹（解压得到）
 | `maxspeed=75 mph` | 121（121–130 档） | `75 mph` |
 | `maxspeed:forward=120` + `maxspeed:backward=80` | 120 | `120/80` |
 | 同上 + `railway:preferred_direction=forward` | 120 | `120 (80)` |
-| 同上 + `railway:preferred_direction=backward` | 80 | `80 (120)` |
+| 同上 + `railway:preferred_direction=backward` | 80 | `120 (80)`（与网页版一致，见 8.4 第 5 条） |
 | 只有 `maxspeed:forward=120` | 120 | `120/–` |
 | 只有 `maxspeed:backward=80` | 无（灰） | `–/80` |
 | `maxspeed=120` + `maxspeed:forward=100` | 无（灰，视为矛盾） | 不标注 |

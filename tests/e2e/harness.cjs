@@ -39,8 +39,20 @@ async function startBackend(homeDir, extraEnv = {}) {
   return { child, url, stderr: () => stderr };
 }
 
-async function openPage({ homeDir, viewport = { width: 1280, height: 800 }, env } = {}) {
+// Settings that keep UI tests away from real Overpass / Protomaps servers.
+const OFFLINE_DOWNLOADS = [
+  '[general]',
+  'overpass_endpoints = http://127.0.0.1:9/api/interpreter',
+  'basemap_source = http://127.0.0.1:9/none.pmtiles',
+  '',
+].join('\n');
+
+async function openPage({ homeDir, viewport = { width: 1280, height: 800 }, env, settings } = {}) {
   const home = homeDir || fs.mkdtempSync(path.join(os.tmpdir(), 'orm-e2e-'));
+  if (settings) {
+    fs.mkdirSync(path.join(home, 'data'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'data', 'settings.ini'), settings);
+  }
   const backend = await startBackend(home, env);
   const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const page = await browser.newPage({ viewport, deviceScaleFactor: 1 });
@@ -56,4 +68,4 @@ async function openPage({ homeDir, viewport = { width: 1280, height: 800 }, env 
   return { page, backend, home, problems, close };
 }
 
-module.exports = { openPage, startBackend, ROOT };
+module.exports = { openPage, startBackend, ROOT, OFFLINE_DOWNLOADS };

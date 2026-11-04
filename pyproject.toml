@@ -38,3 +38,7 @@ offline_railway_map = ["web/**/*"]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 addopts = "-q"
+filterwarnings = [
+    # mapbox-vector-tile 2.x still calls shapely.ops.transform internally
+    "ignore:The 'shapely.ops.transform\\(\\)' function is deprecated:DeprecationWarning",
+]

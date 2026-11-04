@@ -12,12 +12,16 @@ import webbrowser
 from urllib.parse import urlsplit
 
 from . import APP_NAME, __version__
+from .basemap import BasemapFetcher, BasemapTiles, BuildSelector, LowzoomStore, install_ancestors
 from .cells import CellService
 from .coverage import CellCoverage
+from .downloader import Downloader
 from .events import EventBus, frame
 from .net import Http, NetStatus
 from .online_tiles import OnlineTiles
+from .overpass import OverpassClient
 from .paths import Home, web_dir
+from .rail_tiles import RailTiles
 from .server import LocalServer, Request, Response, Router, error_response, json_response
 from .settings import Settings
 from .store import StateStore
@@ -41,8 +45,16 @@ class ShellHooks:
 
 
 class AppCore:
-    def __init__(self, home: Home, settings: Settings, hooks: ShellHooks | None = None, port: int = 0) -> None:
+    def __init__(
+        self,
+        home: Home,
+        settings: Settings,
+        hooks: ShellHooks | None = None,
+        port: int = 0,
+        downloads: bool = True,
+    ) -> None:
         self.home = home
+        self._downloads = downloads  # tests switch the background downloader off
         self.settings = settings
         self.hooks = hooks or ShellHooks()
         self.events = EventBus()
@@ -51,7 +63,21 @@ class AppCore:
         self.coverage = CellCoverage()
         self.online = OnlineTiles(home, self.http, self.status, self.coverage, lambda: self.settings.online_cache_limit_mb)
         self.store = StateStore(home)
-        self.cells = CellService(home, self.store, self.coverage, self.events)
+        self.cells = CellService(
+            home, self.store, self.coverage, self.events, default_basemap_maxzoom=lambda: self.settings.basemap_maxzoom
+        )
+        self.rail = RailTiles(home, self.coverage)
+        self.lowzoom = LowzoomStore(home)
+        self.basemap_tiles = BasemapTiles(home, self.coverage, self.lowzoom, self.rail)
+        self.basemap_selector = BuildSelector(self.http.session, lambda: self.settings.basemap_source)
+        self.basemap = BasemapFetcher(self.http.session, self.basemap_selector, lambda: self.settings.basemap_maxzoom)
+        self.overpass = OverpassClient(self.http.session, lambda: list(self.settings.overpass_endpoints), self.store)
+        self.downloader = Downloader(
+            home, self.store, self.cells, self.overpass, self.rail, self.status, basemap=self.basemap
+        )
+        self.downloader.on_install(lambda cid, cell_dir: install_ancestors(cell_dir, cid, self.lowzoom))
+        self.cells.on_queue(self.downloader.wake)
+        self.cells.on_delete(self._cells_deleted)
 
         self.router = Router()
         self.server = LocalServer(self.router, web_dir(), port=port)
@@ -64,20 +90,32 @@ class AppCore:
     def start(self) -> str:
         """Start serving; return the URL of the page."""
         self.cells.start()
+        self.rail.load_versions(self.store.cells())
         self.server.start()
         self.online_server.start()
         self.online_server.cors_origin = self.server.origin
+        if self._downloads:
+            self.downloader.start()
         return f"{self.server.base_url}/app/index.html"
+
+    def _cells_deleted(self, ids: list[str]) -> None:
+        self.downloader.cancel(ids)
+        self.rail.forget(ids)
+        for cid in ids:
+            self.lowzoom.remove(cid)
 
     @property
     def allowed_origins(self) -> list[str]:
         return [self.server.origin, self.online_server.origin]
 
     def shutdown(self) -> None:
+        self.downloader.stop()
         self.events.close()
         self.server.stop()
         self.online_server.stop()
         self.online.close()
+        self.rail.close_all()
+        self.lowzoom.close()
         self.store.close()
         self.settings.save_if_data_exists(self.home)
 
@@ -97,6 +135,8 @@ class AppCore:
         add("POST", "/api/cells/update", self._api_cells_update)
         add("POST", "/api/cells/update-all", lambda _req: json_response({"count": self.cells.update_all_rail()}))
         add("POST", "/api/downloads/pause", self._api_pause)
+        add("GET", r"/tiles/rail/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_rail)
+        add("GET", r"/tiles/basemap/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_basemap)
         self.online_router.add(
             "GET", r"/tiles/(?P<source>osm|orm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.png", self._tile_online
         )
@@ -195,6 +235,22 @@ class AppCore:
             headers={"Cache-Control": "no-store"},
             stream=self.events.stream(initial),
         )
+
+    def _tile_rail(self, req: Request) -> Response:
+        p = req.params
+        data = self.rail.tile(int(p["z"]), int(p["x"]), int(p["y"]))
+        return Response(200 if data else 204, data, "application/x-protobuf", PNG_HEADERS)
+
+    def _tile_basemap(self, req: Request) -> Response:
+        p = req.params
+        found = self.basemap_tiles.tile(int(p["z"]), int(p["x"]), int(p["y"]))
+        if not found:
+            return Response(204, b"", "application/x-protobuf", PNG_HEADERS)
+        data, compression = found
+        headers = dict(PNG_HEADERS)
+        if compression == 2:
+            headers["Content-Encoding"] = "gzip"
+        return Response(200, data, "application/x-protobuf", headers)
 
     def _tile_online(self, req: Request) -> Response:
         p = req.params

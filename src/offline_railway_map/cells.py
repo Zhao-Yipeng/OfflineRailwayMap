@@ -35,11 +35,19 @@ def public_cell(row: dict) -> dict:
 
 
 class CellService:
-    def __init__(self, home: Home, store: StateStore, coverage: CellCoverage, events: EventBus) -> None:
+    def __init__(
+        self,
+        home: Home,
+        store: StateStore,
+        coverage: CellCoverage,
+        events: EventBus,
+        default_basemap_maxzoom: Callable[[], int] = lambda: 14,
+    ) -> None:
         self.home = home
         self.store = store
         self.coverage = coverage
         self.events = events
+        self.default_basemap_maxzoom = default_basemap_maxzoom
         self.tiles_version = 1
         self._lock = threading.RLock()
         self._on_queue: list[Callable[[], None]] = []
@@ -68,10 +76,14 @@ class CellService:
         return self.store.get_meta("paused") == "1"
 
     def snapshot(self) -> dict:
+        rows = self.store.cells()
+        zooms = [r["basemap_maxzoom"] for r in rows if r["status"] in ("cached", "updating") and r["basemap_maxzoom"]]
         return {
-            "cells": [public_cell(row) for row in self.store.cells()],
+            "cells": [public_cell(row) for row in rows],
             "paused": self.paused,
             "tilesVersion": self.tiles_version,
+            # The basemap source can only have one max zoom: the lowest of the cached cells.
+            "basemapMaxzoom": min(zooms) if zooms else self.default_basemap_maxzoom(),
         }
 
     def publish_cells(self) -> None:
@@ -176,6 +188,11 @@ class CellService:
                 log.exception("coverage listener failed")
         if publish:
             self.events.publish("tiles", {"version": self.tiles_version})
+
+    def bump_tiles(self) -> None:
+        """Make the page reload local tiles (a cached cell's data changed)."""
+        self.tiles_version += 1
+        self.events.publish("tiles", {"version": self.tiles_version})
 
     def reset(self) -> None:
         """After the data folder was deleted: nothing is cached any more."""
