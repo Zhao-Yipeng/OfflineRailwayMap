@@ -1,0 +1,73 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write  # only used to attach the zip to a release on version tags
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Tests
+        run: python -m pytest
+
+      - name: Qt window smoke test (off-screen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tests/qt_smoke.py
+
+      - name: Build (PyInstaller, one folder)
+        run: pyinstaller packaging/OfflineRailwayMap.spec --noconfirm
+
+      - name: The build starts and writes nothing
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process -FilePath "dist/OfflineRailwayMap/OfflineRailwayMap.exe" -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) { throw "the program exited early (code $($p.ExitCode))" }
+          Stop-Process -Id $p.Id -Force
+          Start-Sleep -Seconds 2
+          if (Test-Path "dist/OfflineRailwayMap/data") { throw "a data folder was created by just starting the program" }
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'src'); import offline_railway_map as m; print(m.__version__)"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md -Destination dist/OfflineRailwayMap
+          Copy-Item licenses -Destination dist/OfflineRailwayMap/licenses -Recurse
+          $zip = "OfflineRailwayMap-$version-win64.zip"
+          Compress-Archive -Path dist/OfflineRailwayMap -DestinationPath $zip
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OfflineRailwayMap-win64
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip }}
