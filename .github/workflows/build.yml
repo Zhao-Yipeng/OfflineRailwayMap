@@ -47,13 +47,24 @@ jobs:
       - name: The build starts and writes nothing
         shell: pwsh
         run: |
+          # SPEC 11: nothing in the program folder until there is something to keep,
+          # and never anything under %APPDATA% / %LOCALAPPDATA%.
+          $watched = @($env:APPDATA, $env:LOCALAPPDATA)
+          $list = { $watched | ForEach-Object { Get-ChildItem -Force -LiteralPath $_ | ForEach-Object FullName } }
+          $listTemp = { Get-ChildItem -Force -LiteralPath $env:TEMP | ForEach-Object FullName }
+          $before = & $list
+          $beforeTemp = & $listTemp
           $env:QT_QPA_PLATFORM = "offscreen"
           $p = Start-Process -FilePath "dist/OfflineRailwayMap/OfflineRailwayMap.exe" -PassThru
           Start-Sleep -Seconds 20
           if ($p.HasExited) { throw "the program exited early (code $($p.ExitCode))" }
           Stop-Process -Id $p.Id -Force
-          Start-Sleep -Seconds 2
+          Start-Sleep -Seconds 3
           if (Test-Path "dist/OfflineRailwayMap/data") { throw "a data folder was created by just starting the program" }
+          $new = Compare-Object @($before) @(& $list) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($new) { throw "created outside the program folder: $($new -join ', ')" }
+          $newTemp = Compare-Object @($beforeTemp) @(& $listTemp) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($newTemp) { Write-Warning "new in %TEMP% while the program ran (may be other processes): $($newTemp -join ', ')" }
 
       - name: Package
         id: package
