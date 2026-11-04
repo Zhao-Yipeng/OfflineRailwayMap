@@ -318,7 +318,8 @@ class OnlineTiles:
         now = time.time()
         if "x-blocked" in response.headers or response.status_code in (403, 418, 451):
             reason = response.headers.get("x-blocked") or f"HTTP {response.status_code}"
-            log.warning("%s refused the request: %s", source.name, reason)
+            if time.time() >= self._breakers[source.name].paused_until:  # log once per pause
+                log.warning("%s refused the request: %s", source.name, reason)
             self._pause(source, BLOCK_PAUSE, "blocked", f"{source.label}拒绝访问：{reason}")
             return stale
         if response.status_code == 429:

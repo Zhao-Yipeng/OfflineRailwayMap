@@ -578,7 +578,7 @@ usage 和 service 取 `usage` 和 `service` 标签。如果没有，并且状态
 ### 10.4 本地铁路瓦片
 
 - z8–z14：从对应方格的 `rail.sqlite` 直接读取预生成的瓦片；方格未缓存时返回空瓦片。
-- z2–z7：合并瓦片范围内所有已缓存方格的低级别几何，现场生成，结果缓存到 `data\cache\rail\`。方格集合变化后，相关缓存作废，并在后台预先重建。
+- z2–z7：合并瓦片范围内所有已缓存方格的低级别几何，现场生成，结果缓存在内存和 `data\cache\rail_lowzoom.sqlite` 中。缓存键包含瓦片内每个方格的数据版本，所以只有其中某个方格变化时才重新生成。
 - 瓦片包含两个图层：`rail`（线）和 `stations`（车站点）。线要素的属性有：way_id、cell、state、t、usage、service、minzoom、labelzoom、rank、layer、speed（着色速度）、label（标注文本，只在 z ≥ 9 的瓦片中）、name。
 - 这个地图源的最大级别是 z14，更高级别由引擎放大显示。
 
@@ -610,7 +610,7 @@ OfflineRailwayMap\                       程序文件夹（解压得到）
    ├─ cells\<x>-<y>\basemap.sqlite       该格的离线底图瓦片（z8 至最大级别）
    ├─ basemap_lowzoom.sqlite             z0–z7 底图瓦片（多格共享，带引用计数）
    ├─ cache\online_tiles.sqlite          在线瓦片（OSM、ORM）的硬盘缓存
-   ├─ cache\rail\                        本地生成的低级别铁路瓦片缓存
+   ├─ cache\rail_lowzoom.sqlite          本地生成的低级别（z2–z7）铁路瓦片缓存
    ├─ tmp\                               下载和处理中的临时文件
    └─ logs\app.log                       日志（滚动保存，最多 5 个 2 MB 文件）
 ```
