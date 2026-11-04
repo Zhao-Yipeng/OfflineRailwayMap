@@ -160,13 +160,74 @@ def test_all_servers_unreachable_is_offline(home):
     store.close()
 
 
-def test_area_that_never_works_fails(home, fake):
+def test_area_that_never_works_goes_back_to_the_queue(home, fake):
     fake.routes["/a"] = lambda r: (504, {}, b"")
+    client, store = make_client(home, [fake.url + "/a"])
+    with pytest.raises(ServersBusy):
+        client.fetch_cell(210, 97, threading.Event(), lambda p: None)
+    # depth first: whole cell (z8) -> first quarter (z9) -> z10 -> z11; the
+    # smallest part is retried (three rounds) and then left for later
+    assert len(fake.requests) == 1 + 1 + 1 + 3
+    store.close()
+
+
+def test_retry_continues_where_it_stopped(home, fake):
+    # one railway in the middle of each z11 part of the cell, like real data
+    railways = {}
+    for tx in range(210 * 8, 211 * 8):
+        for ty in range(97 * 8, 98 * 8):
+            west, south, east, north = tile_bounds(11, tx, ty)
+            railways[len(railways)] = ((west + east) / 2, (south + north) / 2)
+    state = {"broken": True}
+    answered = []
+
+    def route(rec):
+        south, west, north, east = (float(v) for v in bbox_of(rec).split(","))
+        if east - west > 0.6 or (state["broken"] and west > 116.0):
+            return 504, {}, b""
+        answered.append(bbox_of(rec))
+        inside = [i for i, (lon, lat) in railways.items() if west <= lon <= east and south <= lat <= north]
+        return reply([{"type": "way", "id": i} for i in inside])
+
+    fake.routes["/a"] = route
+    client, store = make_client(home, [fake.url + "/a"])
+    with pytest.raises(ServersBusy):
+        client.fetch_cell(210, 97, threading.Event(), lambda p: None)
+    first = set(answered)
+    assert first, "some parts were downloaded before the servers gave up"
+    before = len(fake.requests)
+    state["broken"] = False
+    elements = client.fetch_cell(210, 97, threading.Event(), lambda p: None)
+    assert sorted(e["id"] for e in elements) == list(range(64)), "the whole cell, every railway once"
+    again = {bbox_of(r) for r in fake.requests[before:]}
+    assert not again & first, "parts downloaded the first time are not fetched again"
+    assert client._progress == {}, "nothing is kept once the cell is complete"
+    store.close()
+
+
+def test_only_the_current_cell_is_remembered(home, fake):
+    fake.routes["/a"] = lambda r: (504, {}, b"") if whole_cell(r) else reply([{"type": "way", "id": 1}])
+    fake.routes["/b"] = lambda r: (504, {}, b"")
+    endpoints = [fake.url + "/a"]
+    client, store = make_client(home, endpoints)
+    client.fetch_cell(210, 97, threading.Event(), lambda p: None)
+    endpoints[0] = fake.url + "/b"
+    with pytest.raises(ServersBusy):
+        client.fetch_cell(210, 97, threading.Event(), lambda p: None)
+    assert list(client._progress) == [(210, 97)]
+    with pytest.raises(ServersBusy):
+        client.fetch_cell(211, 97, threading.Event(), lambda p: None)
+    assert list(client._progress) == [(211, 97)], "the previous cell's parts are dropped"
+    client.forget_cell(211, 97)
+    assert client._progress == {}
+    store.close()
+
+
+def test_rejected_query_fails(home, fake):
+    fake.routes["/a"] = lambda r: (400, {}, b"syntax error")
     client, store = make_client(home, [fake.url + "/a"])
     with pytest.raises(QueryFailed):
         client.fetch_cell(210, 97, threading.Event(), lambda p: None)
-    # depth first: whole cell (z8) -> first quarter (z9) -> z10 -> z11 -> give up
-    assert len(fake.requests) == 4
     store.close()
 
 
@@ -177,7 +238,7 @@ def test_busy_servers_are_retried_then_reported(home, fake):
     with pytest.raises(ServersBusy):
         client.fetch_cell(210, 97, threading.Event(), lambda p: None)
     # z8, z9, z10: two busy rounds over both servers, then split;
-    # z11 (smallest part): three rounds, then give up for now
+    # z11 (smallest part): three rounds, then left for later
     assert len(fake.requests) == 4 + 4 + 4 + 6
     assert sum(whole_cell(r) for r in fake.requests) == 4
     store.close()

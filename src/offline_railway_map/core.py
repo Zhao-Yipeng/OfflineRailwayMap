@@ -148,6 +148,7 @@ class AppCore:
                 for field in dataclasses.fields(Settings):
                     setattr(self.settings, field.name, getattr(defaults, field.name))
                 self._estimates.clear()
+                self.overpass.forget_all()
                 self.cells.reset()
                 self.events.publish("settings", self.settings.public_dict())
             finally:

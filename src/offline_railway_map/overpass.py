@@ -116,37 +116,51 @@ class OverpassClient:
         self._last_request = 0.0
         self._lock = threading.Lock()
         self._down_until: dict[str, float] = {}
+        # For the cell being downloaded, kept in memory while the program runs:
+        # parts already downloaded and the part size known to be too large, so a
+        # retry (the cell goes back to the queue) continues where it stopped.
+        self._progress: dict[tuple[int, int], dict] = {}
+
+    def forget_cell(self, x: int, y: int) -> None:
+        self._progress.pop((x, y), None)
+
+    def forget_all(self) -> None:
+        self._progress.clear()
 
     # -- public ------------------------------------------------------------------------
 
     def fetch_cell(self, x: int, y: int, cancel: threading.Event, progress: Callable[[float], None]) -> list[dict]:
         """All railway ways and stations touching the cell, deduplicated."""
+        if (x, y) not in self._progress:
+            self._progress.clear()  # only one cell's parts are kept (memory)
+        state = self._progress.setdefault((x, y), {"heavy": -1, "done": {}})
         found: dict[tuple[str, int], dict] = {}
         pending = [(CELL_ZOOM, x, y, 1.0)]
         done = 0.0
-        heavy_zoom = -1  # deepest part size of this cell that the servers refused
         while pending:
             z, tx, ty, weight = pending.pop(0)
             children = [(z + 1, 2 * tx + dx, 2 * ty + dy, weight / 4) for dy in (0, 1) for dx in (0, 1)]
-            if z <= heavy_zoom and z < MAX_SPLIT_ZOOM:
-                # a part of this size was already refused: go straight to smaller parts
-                pending[0:0] = children
-                continue
-            try:
-                elements = self._query_area(
-                    tile_bounds(z, tx, ty), cancel, can_split=z < MAX_SPLIT_ZOOM, timeout=SERVER_TIMEOUT.get(z, 120)
-                )
-            except _NeedsSplit as exc:
-                if z >= MAX_SPLIT_ZOOM:
-                    raise QueryFailed(f"Overpass 服务器拆分查询后仍无法提供该区域的数据（{exc}）") from None
-                log.info("splitting %d/%d/%d after: %s", z, tx, ty, exc)
-                heavy_zoom = max(heavy_zoom, z)
-                pending[0:0] = children
-                continue
+            elements = state["done"].get((z, tx, ty))
+            if elements is None:
+                if z <= state["heavy"] and z < MAX_SPLIT_ZOOM:
+                    # a part of this size was already refused: go straight to smaller parts
+                    pending[0:0] = children
+                    continue
+                try:
+                    elements = self._query_area(
+                        tile_bounds(z, tx, ty), cancel, can_split=z < MAX_SPLIT_ZOOM, timeout=SERVER_TIMEOUT.get(z, 120)
+                    )
+                except _NeedsSplit as exc:
+                    log.info("splitting %d/%d/%d after: %s", z, tx, ty, exc)
+                    state["heavy"] = max(state["heavy"], z)
+                    pending[0:0] = children
+                    continue
+                state["done"][(z, tx, ty)] = elements
             for element in elements:
                 found[(element["type"], element["id"])] = element
             done += weight
             progress(min(1.0, done))
+        self._progress.pop((x, y), None)
         return list(found.values())
 
     def lines_near(self, lon: float, lat: float, radius: float) -> list[dict]:
@@ -226,21 +240,20 @@ class OverpassClient:
                         heavy_failures += 1
                         last_problem = f"{endpoint}: {exc}"
                         break
-                if heavy_failures >= HEAVY_FAILURES_BEFORE_SPLIT:
+                if can_split and heavy_failures >= HEAVY_FAILURES_BEFORE_SPLIT:
                     raise _NeedsSplit(last_problem)
             if tried == 0:
                 raise BudgetExhausted("today's Overpass usage limit is reached on every server")
             if connection_failures == tried:
                 raise Offline("no Overpass server can be reached")
-            if heavy_failures:
+            if can_split and (heavy_failures or attempt + 1 >= BUSY_ROUNDS_BEFORE_SPLIT):
                 raise _NeedsSplit(last_problem)
-            # every reachable server was busy: split if possible, otherwise wait and retry
-            if can_split and attempt + 1 >= BUSY_ROUNDS_BEFORE_SPLIT:
-                raise _NeedsSplit(f"servers keep refusing this area ({last_problem})")
+            # Busy servers, or the smallest part still refused (that is overload,
+            # not too much data): wait and try again.
             if attempt < len(self.busy_backoff):
-                log.info("all Overpass servers busy, waiting %.0f s", self.busy_backoff[attempt])
+                log.info("Overpass servers busy, waiting %.0f s", self.busy_backoff[attempt])
                 self._wait(self.busy_backoff[attempt], cancel)
-        raise ServersBusy(f"Overpass servers are busy ({last_problem})")
+        raise ServersBusy(f"Overpass 服务器繁忙（{last_problem}）")
 
     def _post(self, endpoint: str, query: str, cancel: threading.Event, read_timeout: float = 330) -> list[dict]:
         response = self.session.post(

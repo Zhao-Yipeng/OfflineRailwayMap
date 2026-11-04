@@ -86,6 +86,9 @@ class Downloader:
         with self._current_lock:
             if self._current and self._current[0] in ids:
                 self._current[1].set()
+        for cid in ids:
+            x, y = (int(v) for v in cid.split("-"))
+            self.client.forget_cell(x, y)
 
     def cancel_all(self) -> None:
         with self._current_lock:
