@@ -225,14 +225,14 @@ class Downloader:
             if target.exists():
                 for existing in target.iterdir():  # keep files this run did not replace (e.g. the basemap)
                     if not (work / existing.name).exists():
-                        existing.rename(work / existing.name)
+                        _retry(lambda e=existing: e.rename(work / e.name))
                 old = target.with_name(cid + ".old")
                 shutil.rmtree(old, ignore_errors=True)
-                target.rename(old)
-                work.rename(target)
+                _retry(lambda: target.rename(old))
+                _retry(lambda: work.rename(target))
                 shutil.rmtree(old, ignore_errors=True)
             else:
-                work.rename(target)
+                _retry(lambda: work.rename(target))
             for callback in list(self._on_install):
                 callback(cid, target)
         now = time.time()
@@ -261,6 +261,17 @@ class Downloader:
 
     def _publish(self, cid: str, force: bool = False) -> None:
         self.cells.publish_cell(cid)
+
+
+def _retry(action, attempts: int = 6, delay: float = 0.5):
+    """Windows: a just-written file can be locked briefly (e.g. by antivirus)."""
+    for attempt in range(attempts):
+        try:
+            return action()
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
 
 
 def _seconds_to_utc_midnight() -> float:

@@ -21,7 +21,7 @@ const { openPage } = require('./harness.cjs');
         return data.cells.find((c) => c.id === id);
       }, [base, cell]);
       if (row && (row.status === 'cached' || row.status === 'failed')) break;
-      if (Date.now() - started > 25 * 60 * 1000) break;
+      if (Date.now() - started > Number(process.env.E2E_WAIT_MIN || 25) * 60 * 1000) break;
       await page.waitForTimeout(2000);
     }
     console.log(`cell ${cell}: ${row && row.status} after ${Math.round((Date.now() - started) / 1000)} s, ${row && (row.bytes / 1e6).toFixed(1)} MB`, row && row.error ? row.error : '');
