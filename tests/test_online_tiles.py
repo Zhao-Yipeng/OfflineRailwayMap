@@ -155,6 +155,19 @@ def test_cache_is_trimmed_to_its_limit(home, fake):
     tiles.close()
 
 
+def test_memory_only_mode_after_clearing(home, fake):
+    fake.routes["/orm/6/1/1.png"] = lambda r: (200, {"Content-Type": "image/png", "Cache-Control": "max-age=600"}, RED)
+    tiles, _ = make_tiles(home, fake.url)
+    tiles.cache.memory_only = True
+    assert tiles.tile("orm", 6, 1, 1) == RED
+    assert tiles.tile("orm", 6, 1, 1) == RED
+    assert fake.count("/orm/") == 1, "still cached, but only in memory"
+    assert not home.data_exists(), "the data folder is not recreated"
+    home.ensure_data()  # e.g. the user starts a download
+    assert tiles.cache.memory_only is False
+    tiles.close()
+
+
 def test_out_of_range_tiles_are_empty(home, fake):
     tiles, _ = make_tiles(home, fake.url)
     assert tiles.tile("orm", 1, 0, 0) == TRANSPARENT_PNG  # below ORM's min zoom

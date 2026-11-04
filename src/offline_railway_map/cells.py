@@ -189,6 +189,15 @@ class CellService:
         if publish:
             self.events.publish("tiles", {"version": self.tiles_version})
 
+    def mark_failed(self, cid: str, message: str) -> None:
+        """A cached cell turned out to be unusable (e.g. damaged database)."""
+        row = self.store.cell(cid)
+        if row is None or row["status"] == "failed":
+            return
+        self.store.update_cell(cid, status="failed", error=message, update_kind=None, stage=None, progress=0)
+        self.sync_coverage()
+        self.publish_cells()
+
     def bump_tiles(self) -> None:
         """Make the page reload local tiles (a cached cell's data changed)."""
         self.tiles_version += 1

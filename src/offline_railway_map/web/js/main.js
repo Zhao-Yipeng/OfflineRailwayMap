@@ -2,9 +2,14 @@
 import { api, setOnlineOrigin, subscribe } from './api.js';
 import { addBasemap, loadBasemapStyle, refreshBasemap, setBasemapMaxzoom } from './basemap.js';
 import { Cells, renderDownloadPanel } from './grid.js';
+import { setupClearButton } from './clear.js';
+import { setupDetails } from './details.js';
 import { addGroupMarkers, addOnlineLayers, refreshOnlineLayers } from './layers.js';
+import { setupLegend } from './legend.js';
 import { createMap } from './map.js';
 import { addRailLayers, refreshRailLayers } from './rail.js';
+import { setupSearch } from './search.js';
+import { setupSettings } from './settings.js';
 import { $, attachScale, renderAttribution, renderStatus, showFatal, toast } from './ui.js';
 
 function hasWebGL2() {
@@ -59,7 +64,6 @@ async function boot() {
   renderStatus(info.status);
   attachScale(map);
   rememberView(map);
-  $('btn-clear').disabled = true;
 
   const [snapshot] = await Promise.all([
     api.get('/api/cells'),
@@ -84,6 +88,15 @@ async function boot() {
   cells.setMode(cells.hasAnyCells ? 'browse' : 'edit');
   setupModeButton(cells);
   renderDownloadPanel(cells);
+  setupSearch(map);
+  setupDetails(map, cells);
+  setupLegend();
+  const applySettings = (s) => {
+    cells.showOutline = s.showCachedOutline;
+    cells.refresh();
+  };
+  setupSettings(applySettings);
+  setupClearButton(cells);
 
   subscribe({
     hello: () => { document.body.dataset.connected = 'true'; },
@@ -94,6 +107,7 @@ async function boot() {
       renderDownloadPanel(cells);
     },
     cell: (row) => { cells.updateCell(row); renderDownloadPanel(cells); },
+    settings: applySettings,
     tiles: ({ version }) => {
       refreshOnlineLayers(map, version);
       refreshRailLayers(map, version);

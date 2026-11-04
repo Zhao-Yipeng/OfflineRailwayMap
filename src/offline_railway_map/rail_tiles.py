@@ -44,6 +44,7 @@ class RailTiles:
         self._versions: dict[str, str] = {}
         self._memory: OrderedDict[str, bytes] = OrderedDict()
         self._disk: sqlite3.Connection | None = None
+        self.on_corrupt = lambda cid: None  # SPEC §15: a damaged cell database -> cell failed
 
     # -- versions ---------------------------------------------------------------------
 
@@ -143,11 +144,18 @@ class RailTiles:
             cx, cy = x >> shift, y >> shift
             if not self.coverage.is_cached(cx, cy):
                 return b""
-            with self._lock:
-                conn = self._cell_conn(cell_id(cx, cy))
-                if conn is None:
-                    return b""
-                row = conn.execute("SELECT data FROM tiles WHERE z=? AND x=? AND y=?", (z, x, y)).fetchone()
+            cid = cell_id(cx, cy)
+            try:
+                with self._lock:
+                    conn = self._cell_conn(cid)
+                    if conn is None:
+                        return b""
+                    row = conn.execute("SELECT data FROM tiles WHERE z=? AND x=? AND y=?", (z, x, y)).fetchone()
+            except sqlite3.DatabaseError:
+                log.exception("railway data of cell %s is damaged", cid)
+                self.close_cell(cid)
+                self.on_corrupt(cid)
+                return b""
             return row[0] if row else b""
         return self._lowzoom(z, x, y)
 

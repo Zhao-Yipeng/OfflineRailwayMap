@@ -17,6 +17,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Callable
@@ -86,15 +87,34 @@ def expiry_from_headers(headers, now: float) -> tuple[float, bool]:
     return now + DEFAULT_TTL, True
 
 
+MEMORY_ONLY_LIMIT = 256 * 1024 * 1024
+
+
 class OnlineTileCache:
-    """``data/cache/online_tiles.sqlite``; created when the first tile is stored."""
+    """``data/cache/online_tiles.sqlite``; created when the first tile is stored.
+
+    After 「清空缓存」 the cache runs in memory only (``memory_only``), so that
+    reloading the map does not recreate the data folder; it goes back to disk
+    as soon as something else creates the data folder (SPEC §6.6).
+    """
 
     def __init__(self, home: Home, limit_bytes: Callable[[], int]) -> None:
         self.home = home
         self._limit_bytes = limit_bytes
         self._conn: sqlite3.Connection | None = None
-        self._lock = threading.Lock()
+        # Re-entrant: creating the data folder (inside put) runs _disk_allowed.
+        self._lock = threading.RLock()
         self._total = 0
+        self.memory_only = False
+        self._memory: OrderedDict[tuple, CachedTile] = OrderedDict()
+        self._memory_bytes = 0
+        home.on_data_created(self._disk_allowed)
+
+    def _disk_allowed(self) -> None:
+        with self._lock:
+            self.memory_only = False
+            self._memory.clear()
+            self._memory_bytes = 0
 
     @property
     def path(self):
@@ -121,6 +141,11 @@ class OnlineTileCache:
 
     def get(self, source: str, z: int, x: int, y: int) -> CachedTile | None:
         with self._lock:
+            if self.memory_only:
+                tile = self._memory.get((source, z, x, y))
+                if tile is not None:
+                    self._memory.move_to_end((source, z, x, y))
+                return tile
             conn = self._connection(create=False)
             if conn is None:
                 return None
@@ -139,6 +164,15 @@ class OnlineTileCache:
 
     def put(self, source: str, z: int, x: int, y: int, tile: CachedTile) -> None:
         with self._lock:
+            if self.memory_only:
+                key = (source, z, x, y)
+                old = self._memory.pop(key, None)
+                self._memory_bytes += len(tile.data) - (len(old.data) if old else 0)
+                self._memory[key] = tile
+                while self._memory_bytes > MEMORY_ONLY_LIMIT and self._memory:
+                    _, dropped = self._memory.popitem(last=False)
+                    self._memory_bytes -= len(dropped.data)
+                return
             conn = self._connection(create=True)
             old = conn.execute(
                 "SELECT size FROM tiles WHERE source=? AND z=? AND x=? AND y=?", (source, z, x, y)
@@ -152,6 +186,11 @@ class OnlineTileCache:
 
     def refresh(self, source: str, z: int, x: int, y: int, expires: float) -> None:
         with self._lock:
+            if self.memory_only:
+                tile = self._memory.get((source, z, x, y))
+                if tile is not None:
+                    tile.expires = expires
+                return
             conn = self._connection(create=False)
             if conn is not None:
                 conn.execute(

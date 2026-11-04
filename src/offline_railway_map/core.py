@@ -7,11 +7,15 @@ be driven by a normal browser in tests.  The window shell supplies
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import random
+import shutil
+import threading
 import webbrowser
 from urllib.parse import urlsplit
 
-from . import APP_NAME, __version__
+from . import APP_NAME, __version__, cleanup, logs
 from .basemap import BasemapFetcher, BasemapTiles, BuildSelector, LowzoomStore, install_ancestors
 from .cells import CellService
 from .coverage import CellCoverage
@@ -21,7 +25,11 @@ from .net import Http, NetStatus
 from .online_tiles import OnlineTiles
 from .overpass import OverpassClient
 from .paths import Home, web_dir
+from .classify import classify
+from .grid import cell_at, cell_id, parse_cell_id
+from .speed import color_speed, speed_label
 from .rail_tiles import RailTiles
+from .search import SearchService
 from .server import LocalServer, Request, Response, Router, error_response, json_response
 from .settings import Settings
 from .store import StateStore
@@ -29,6 +37,23 @@ from .store import StateStore
 log = logging.getLogger(__name__)
 
 PNG_HEADERS = {"Cache-Control": "no-store"}
+RAIL_BYTES_PER_CELL = 2 * 1024 * 1024  # SPEC §9.7 rough estimate
+ESTIMATE_SAMPLE = 100
+
+
+def describe_line(way_id: int, tags: dict) -> dict:
+    """What the details popup shows besides the raw tags (SPEC §6.8)."""
+    cls = classify(tags)
+    return {
+        "id": way_id,
+        "tags": tags,
+        "state": cls.state if cls else None,
+        "kind": cls.kind if cls else tags.get("railway"),
+        "usage": cls.usage if cls else tags.get("usage"),
+        "service": cls.service if cls else tags.get("service"),
+        "speedLabel": speed_label(tags),
+        "colorSpeed": color_speed(tags),
+    }
 
 
 class ShellHooks:
@@ -78,6 +103,10 @@ class AppCore:
         self.downloader.on_install(lambda cid, cell_dir: install_ancestors(cell_dir, cid, self.lowzoom))
         self.cells.on_queue(self.downloader.wake)
         self.cells.on_delete(self._cells_deleted)
+        self.rail.on_corrupt = lambda cid: self.cells.mark_failed(cid, "数据已损坏，请重新下载")
+        self.search = SearchService(self.http.session, self.store, self.status)
+        self._clear_lock = threading.Lock()
+        self._estimates: dict[str, int] = {}
 
         self.router = Router()
         self.server = LocalServer(self.router, web_dir(), port=port)
@@ -97,6 +126,58 @@ class AppCore:
         if self._downloads:
             self.downloader.start()
         return f"{self.server.base_url}/app/index.html"
+
+    def clear_cache(self) -> list[str]:
+        """「清空缓存」(SPEC §6.6): delete the whole data folder, reset in memory.
+
+        Returns the paths that could not be deleted (empty on success).
+        """
+        with self._clear_lock:
+            self.downloader.suspend()
+            try:
+                self.online.close()
+                self.rail.close_all()
+                self.rail.forget(list(self.rail._versions))
+                self.lowzoom.close()
+                self.store.close()
+                logs.detach_file()
+                failed = cleanup.remove_data(self.home)
+                # Reloading the map right after clearing must not recreate data\ (SPEC §6.6).
+                self.online.cache.memory_only = True
+                defaults = Settings()
+                for field in dataclasses.fields(Settings):
+                    setattr(self.settings, field.name, getattr(defaults, field.name))
+                self._estimates.clear()
+                self.cells.reset()
+                self.events.publish("settings", self.settings.public_dict())
+            finally:
+                self.downloader.resume()
+        return [str(p) for p in failed]
+
+    def estimate(self, ids: list[str]) -> dict:
+        """Rough download size for new cells (SPEC §9.7)."""
+        cells = [parse_cell_id(c) for c in ids]
+        sample = cells if len(cells) <= ESTIMATE_SAMPLE else random.sample(cells, ESTIMATE_SAMPLE)
+        total, failures = 0, 0
+        for x, y in sample:
+            key = cell_id(x, y)
+            if key not in self._estimates:
+                try:
+                    self._estimates[key] = self.basemap.estimate(x, y)
+                except Exception:  # noqa: BLE001 - estimate is best effort
+                    failures += 1
+                    continue
+            total += self._estimates[key]
+        measured = len(sample) - failures
+        basemap = int(total * len(cells) / measured) if measured else None
+        return {
+            "cells": len(cells),
+            "basemapBytes": basemap,
+            "railBytes": RAIL_BYTES_PER_CELL * len(cells),
+            "bytes": (basemap or 0) + RAIL_BYTES_PER_CELL * len(cells),
+            "sampled": len(sample) < len(cells),
+            "free": shutil.disk_usage(self.home.root).free,
+        }
 
     def _cells_deleted(self, ids: list[str]) -> None:
         self.downloader.cancel(ids)
@@ -135,6 +216,13 @@ class AppCore:
         add("POST", "/api/cells/update", self._api_cells_update)
         add("POST", "/api/cells/update-all", lambda _req: json_response({"count": self.cells.update_all_rail()}))
         add("POST", "/api/downloads/pause", self._api_pause)
+        add("POST", "/api/clear", self._api_clear)
+        add("POST", "/api/estimate", self._api_estimate)
+        add("GET", "/api/search", lambda req: json_response(self.search.search(req.query.get("q", ""))))
+        add("GET", "/api/details", self._api_details)
+        add("GET", "/api/details/online", self._api_details_online)
+        add("GET", "/api/settings", self._api_settings)
+        add("POST", "/api/settings", self._api_settings_save)
         add("GET", r"/tiles/rail/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_rail)
         add("GET", r"/tiles/basemap/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_basemap)
         self.online_router.add(
@@ -152,6 +240,7 @@ class AppCore:
                 "view": {"lon": lon, "lat": lat, "zoom": zoom},
                 "settings": self.settings.public_dict(),
                 "status": self.status.snapshot(),
+                "about": self._about(),
             }
         )
 
@@ -235,6 +324,76 @@ class AppCore:
             headers={"Cache-Control": "no-store"},
             stream=self.events.stream(initial),
         )
+
+    def _api_clear(self, _req: Request) -> Response:
+        failed = self.clear_cache()
+        return json_response({"ok": not failed, "failed": failed[:20]})
+
+    def _api_estimate(self, req: Request) -> Response:
+        try:
+            return json_response(self.estimate(self._ids(req.json(), "cells")))
+        except ValueError as exc:
+            return error_response(400, str(exc))
+
+    def _api_details(self, req: Request) -> Response:
+        """Tags of a cached line (SPEC §6.8)."""
+        try:
+            cid = cell_id(*parse_cell_id(req.query.get("cell", "")))
+            way_id = int(req.query.get("way", ""))
+        except ValueError as exc:
+            return error_response(400, str(exc))
+        tags = self.rail.way_tags(cid, way_id)
+        if tags is None:
+            return error_response(404, "not found")
+        row = self.store.cell(cid) or {}
+        return json_response({**describe_line(way_id, tags), "cell": cid, "railAt": row.get("rail_at")})
+
+    def _api_details_online(self, req: Request) -> Response:
+        """Lines near a point outside the cached area, via Overpass (SPEC §6.8, P2)."""
+        try:
+            lon, lat = float(req.query["lon"]), float(req.query["lat"])
+            radius = max(1.0, min(50.0, float(req.query.get("radius", 20))))
+        except (KeyError, ValueError):
+            return error_response(400, "bad point")
+        if self.coverage.is_cached(*cell_at(lon, lat)):
+            return json_response({"lines": []})
+        try:
+            lines = self.overpass.lines_near(lon, lat, radius)
+        except Exception as exc:  # noqa: BLE001 - reported to the page
+            return error_response(503, f"联网查询失败：{exc}")
+        return json_response({"lines": [describe_line(line["id"], line["tags"]) for line in lines]})
+
+    def _api_settings(self, _req: Request) -> Response:
+        return json_response({"settings": self.settings.public_dict(), "about": self._about()})
+
+    def _api_settings_save(self, req: Request) -> Response:
+        try:
+            self.settings.apply_user_changes(req.json() or {})
+        except (ValueError, TypeError) as exc:
+            return error_response(400, str(exc))
+        self.settings.save(self.home)
+        self.events.publish("settings", self.settings.public_dict())
+        return json_response({"settings": self.settings.public_dict()})
+
+    @staticmethod
+    def _about() -> dict:
+        return {
+            "app": APP_NAME,
+            "version": __version__,
+            "license": "GPL-3.0",
+            "disclaimer": "OfflineRailwayMap 是独立的第三方程序，与 OpenRailwayMap 项目和 OpenStreetMap 基金会无关。",
+            "components": [
+                ["Qt / PySide6", "LGPL-3.0"],
+                ["MapLibre GL JS 5.24.0", "BSD-3-Clause"],
+                ["Protomaps basemaps 样式 5.7.2", "BSD-3-Clause"],
+                ["Noto Sans 字体", "SIL OFL 1.1"],
+                ["OpenRailwayMap-CartoCSS（速度颜色、线宽、显示规则）", "GPL-3.0-or-later"],
+                ["shapely", "BSD-3-Clause"],
+                ["requests", "Apache-2.0"],
+                ["mapbox-vector-tile", "MIT"],
+                ["地图数据 © OpenStreetMap contributors", "ODbL"],
+            ],
+        }
 
     def _tile_rail(self, req: Request) -> Response:
         p = req.params

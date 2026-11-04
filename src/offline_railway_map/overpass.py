@@ -122,7 +122,7 @@ class OverpassClient:
                 elements = self._query_area(tile_bounds(z, tx, ty), cancel)
             except _NeedsSplit as exc:
                 if z >= MAX_SPLIT_ZOOM:
-                    raise QueryFailed(f"Overpass could not deliver the area ({exc})") from None
+                    raise QueryFailed(f"Overpass 服务器拆分查询后仍无法提供该区域的数据（{exc}）") from None
                 log.info("splitting %d/%d/%d after: %s", z, tx, ty, exc)
                 children = [(z + 1, 2 * tx + dx, 2 * ty + dy, weight / 4) for dy in (0, 1) for dx in (0, 1)]
                 pending[0:0] = children
@@ -132,6 +132,28 @@ class OverpassClient:
             done += weight
             progress(min(1.0, done))
         return list(found.values())
+
+    def lines_near(self, lon: float, lat: float, radius: float) -> list[dict]:
+        """Tags of railway lines within ``radius`` metres of a point (click details)."""
+        query = (
+            "[out:json][timeout:25];"
+            f'way(around:{radius:.0f},{lat:.7f},{lon:.7f})'
+            '["railway"~"^(rail|narrow_gauge|subway|light_rail|tram|construction|proposed|disused)$"];'
+            "out tags;"
+        )
+        last: Exception | None = None
+        for endpoint in self._ordered_endpoints():
+            if not self._within_budget(endpoint):
+                continue
+            try:
+                response = self.session.post(endpoint, data={"data": query}, timeout=(10, 40))
+                self._record(endpoint, len(response.content))
+                if response.status_code == 200:
+                    return [{"id": e["id"], "tags": e.get("tags", {})} for e in response.json().get("elements", [])]
+                last = RuntimeError(f"HTTP {response.status_code}")
+            except requests.RequestException as exc:
+                last = exc
+        raise RuntimeError(str(last) if last else "no Overpass server available")
 
     # -- one area ------------------------------------------------------------------------
 
@@ -161,12 +183,12 @@ class OverpassClient:
                     except requests.ConnectionError as exc:
                         connection_failures += 1
                         self._down_until[endpoint] = time.monotonic() + DOWN_FOR
-                        last_problem = f"{endpoint}: cannot connect"
+                        last_problem = f"{endpoint}: 无法连接"
                         log.warning("Overpass %s unreachable: %s", endpoint, exc)
                         break
                     except requests.Timeout:
                         heavy_failures += 1
-                        last_problem = f"{endpoint}: timed out"
+                        last_problem = f"{endpoint}: 超时"
                         break
                     except _HttpError as exc:
                         if exc.status == 429 and rate_limited < MAX_429_RETRIES:
@@ -174,7 +196,7 @@ class OverpassClient:
                             self._wait(exc.retry_after or self.default_retry_after, cancel)
                             continue
                         if exc.status == 400:
-                            raise QueryFailed(f"{endpoint} rejected the query") from None
+                            raise QueryFailed(f"{endpoint} 拒绝了查询（rejected the query）") from None
                         if exc.status in (429, 502, 503, 504):
                             if time.monotonic() - started < self.busy_response_seconds:
                                 busy += 1

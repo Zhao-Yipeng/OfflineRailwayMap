@@ -58,7 +58,12 @@ class Downloader:
         self.basemap = basemap
         self._wake = threading.Event()
         self._stop = threading.Event()
+        self._suspended = threading.Event()  # set while the data folder is being cleared
+        self._idle = threading.Event()
+        self._idle.set()
         self._thread: threading.Thread | None = None
+        self.min_free_bytes = 1024**3  # SPEC §9.7: pause below 1 GB free
+        self.free_bytes: Callable[[], int] = lambda: shutil.disk_usage(self.home.root).free
         self._current: tuple[str, threading.Event] | None = None
         self._current_lock = threading.Lock()
         self._last_publish = 0.0
@@ -98,6 +103,17 @@ class Downloader:
     def busy(self) -> bool:
         return self._current is not None
 
+    def suspend(self, timeout: float = 20.0) -> bool:
+        """Stop working (cancel the current cell) until ``resume``; True when idle."""
+        self._suspended.set()
+        self.cancel_all()
+        self._wake.set()
+        return self._idle.wait(timeout)
+
+    def resume(self) -> None:
+        self._suspended.clear()
+        self._wake.set()
+
     def _sleep(self, seconds: float) -> None:
         self._wake.wait(seconds)
         self._wake.clear()
@@ -107,14 +123,24 @@ class Downloader:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                if self.cells.paused:
+                if self._suspended.is_set() or self.cells.paused:
                     self._sleep(5)
                     continue
                 job = self.store.next_job()
                 if job is None:
                     self._sleep(30)
                     continue
-                self._process(job)
+                if self.free_bytes() < self.min_free_bytes:
+                    self.status.service("disk", "paused", "磁盘剩余空间不足 1 GB，下载已暂停")
+                    self.cells.set_paused(True)
+                    continue
+                self.status.service("disk", "ok")
+                self._idle.clear()
+                try:
+                    if not self._suspended.is_set():
+                        self._process(job)
+                finally:
+                    self._idle.set()
             except overpass.Offline:
                 self.status.service("overpass", "paused", "无法连接 Overpass 服务器，下载将在恢复联网后继续")
                 self._sleep(OFFLINE_RETRY)

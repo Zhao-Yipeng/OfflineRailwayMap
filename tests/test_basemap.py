@@ -95,7 +95,7 @@ def test_extract_cell_and_share_ancestors(home, archive_server):
     work.rename(cell_dir)
     lowzoom = LowzoomStore(home)
     install_ancestors(cell_dir, "210-97", lowzoom)
-    assert lowzoom.get(5, CX >> 3, CY >> 3)[0] == gzip.compress(b"ancestor 5")
+    assert gzip.decompress(lowzoom.get(5, CX >> 3, CY >> 3)[0]) == b"ancestor 5"
     tiles = BasemapTiles(home, CellCoverage({(CX, CY)}), lowzoom, RailTiles(home, CellCoverage({(CX, CY)})))
     data, compression = tiles.tile(9, CX * 2 + 1, CY * 2)
     assert gzip.decompress(data) == b"9/1/0" and compression == 2

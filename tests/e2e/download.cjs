@@ -27,12 +27,18 @@ const { openPage } = require('./harness.cjs');
     console.log(`cell ${cell}: ${row && row.status} after ${Math.round((Date.now() - started) / 1000)} s, ${row && (row.bytes / 1e6).toFixed(1)} MB`, row && row.error ? row.error : '');
     expect(row && row.status === 'cached', 'cell was not cached');
     await page.click('#btn-mode').catch(() => {}); // leave edit mode if needed
+    // Views around the cell: overview, inside at z9 and z12.5, and on its east border.
+    const [cx, cy] = cell.split('-').map(Number);
+    const lon = (x) => (x / 256) * 360 - 180;
+    const lat = (y) => (180 / Math.PI) * Math.atan(Math.sinh(Math.PI - (2 * Math.PI * y) / 256));
+    const centre = [lon(cx + 0.5), lat(cy + 0.5)];
     const views = [
-      ['overview', [116.0, 39.4], 6.5],
-      ['z9', [116.25, 39.65], 9],
-      ['z12', [116.38, 39.865], 12.5],
-      ['border', [116.718, 39.6], 9.5],
+      ['overview', centre, 6.5],
+      ['z9', centre, 9],
+      ['z12', centre, 12.5],
+      ['border', [lon(cx + 1), lat(cy + 0.5)], 9.5],
     ];
+    if (process.env.E2E_VIEWS) for (const v of JSON.parse(process.env.E2E_VIEWS)) views.push(v);
     for (const [name, center, zoom] of views) {
       await page.evaluate(([c, z]) => window.__map.jumpTo({ center: c, zoom: z }), [center, zoom]);
       await page.waitForFunction(() => window.__map.areTilesLoaded(), null, { timeout: 60000 });

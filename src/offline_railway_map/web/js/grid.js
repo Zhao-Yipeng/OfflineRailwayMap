@@ -82,6 +82,9 @@ export class Cells {
     this.showOutline = showOutline;
     this.onModeChange = onModeChange || (() => {});
     this._refreshQueued = false;
+    this.estimate = null; // { key, bytes, free, sampled } for the pending additions
+    this._estimateTimer = null;
+    this._estimateKey = '';
     this._setupLayers();
     this._setupInteraction();
   }
@@ -103,6 +106,11 @@ export class Cells {
 
   get hasAnyCells() {
     return this.cells.size > 0;
+  }
+
+  isCached(id) {
+    const row = this.cells.get(id);
+    return !!row && (row.status === 'cached' || row.status === 'updating');
   }
 
   displayState(id) {
@@ -129,9 +137,45 @@ export class Cells {
     this.onModeChange(mode);
   }
 
+  // Size estimate of the pending additions (SPEC §9.7), refreshed shortly after edits.
+  _scheduleEstimate() {
+    const key = [...this.pendingAdd].sort().join(',');
+    if (key === this._estimateKey) return;
+    this._estimateKey = key;
+    this.estimate = key ? { key, pending: true } : null;
+    clearTimeout(this._estimateTimer);
+    if (!key) return;
+    this._estimateTimer = setTimeout(async () => {
+      try {
+        const result = await api.post('/api/estimate', { cells: key.split(',') });
+        if (this._estimateKey === key) this.estimate = { key, ...result };
+      } catch {
+        if (this._estimateKey === key) this.estimate = { key, failed: true };
+      }
+      this._renderEditBar();
+    }, 800);
+  }
+
+  _estimateText() {
+    const e = this.estimate;
+    if (!e) return '';
+    if (e.pending) return '（预计大小估算中…）';
+    if (e.failed || e.basemapBytes == null) return '（暂时无法估算大小）';
+    return `（预计约 ${formatBytes(e.bytes)}${e.sampled ? '，抽样估算' : ''}）`;
+  }
+
   async applyEdits() {
     const add = [...this.pendingAdd];
     const remove = [...this.pendingRemove];
+    const e = this.estimate;
+    if (add.length && e && !e.pending && !e.failed && e.free != null && e.bytes + 1e9 > e.free) {
+      const ok = await confirmDialog({
+        title: '磁盘空间可能不足',
+        message: `预计需要约 ${formatBytes(e.bytes)}，磁盘剩余 ${formatBytes(e.free)}。\n空间不足 1 GB 时下载会自动暂停。仍要继续吗？`,
+        okText: '继续',
+      });
+      if (!ok) return false;
+    }
     if (remove.length) {
       const ok = await confirmDialog({
         title: '删除已缓存的方格',
@@ -340,8 +384,9 @@ export class Cells {
       });
       if (ok) api.post('/api/cells/update-all').catch((e) => toast(e.message, 'error'));
     };
+    this._scheduleEstimate();
     bar.replaceChildren(...[
-      el('span', {}, `新增 ${this.pendingAdd.size} 格 · 将删除 ${this.pendingRemove.size} 格 · 已缓存 ${cached} 格（共 ${formatBytes(bytes)}）`),
+      el('span', {}, `新增 ${this.pendingAdd.size} 格${this._estimateText()} · 将删除 ${this.pendingRemove.size} 格 · 已缓存 ${cached} 格（共 ${formatBytes(bytes)}）`),
       changes ? el('button', { type: 'button', class: 'link undo', onclick: () => this.discardEdits() }, '撤销本次更改') : null,
       cached ? el('button', { type: 'button', class: 'link', onclick: updateAll }, '全部更新铁路数据') : null,
       el('span', { class: 'hint' }, '单击选择 · Shift+拖动框选 · Alt+拖动取消 · 右键已缓存方格可更新或删除'),
