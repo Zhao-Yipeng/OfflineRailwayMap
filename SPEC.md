@@ -375,9 +375,9 @@ railway 为其他值的元素（如 preserved、abandoned）不下载，也不�
 
   | 种类 | 起始级别 |
   |------|----------|
-  | 车站（railway=station，且 station 不是 subway / light_rail / monorail） | z9 |
+  | 车站（railway=station，且不属于下面的地铁、轻轨站） | z9 |
   | 停靠站（railway=halt） | z12 |
-  | 地铁、轻轨站（station = subway / light_rail / monorail） | z13 |
+  | 地铁、轻轨站（station = subway / light_rail / monorail；没有 station 标签时，subway / light_rail / monorail = yes 且没有 train = yes） | z13 |
 
 - 名称自动避让。冲突时依次优先车站、停靠站、地铁轻轨站。
 - 未缓存区域不单独画车站，由在线底图显示。

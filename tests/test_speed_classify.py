@@ -113,3 +113,9 @@ def test_station_kinds():
     assert station_kind({"railway": "station", "station": "subway"}) == "urban"
     assert station_kind({"railway": "halt"}) == "halt"
     assert station_kind({"railway": "platform"}) is None
+    # no station=* tag: the public-transport mode tags decide
+    assert station_kind({"railway": "station", "subway": "yes"}) == "urban"
+    assert station_kind({"railway": "station", "light_rail": "yes"}) == "urban"
+    assert station_kind({"railway": "station", "subway": "yes", "train": "yes"}) == "station"
+    assert station_kind({"railway": "station", "train": "yes"}) == "station"
+    assert station_kind({"railway": "station", "station": "train", "subway": "yes"}) == "station"

@@ -174,11 +174,24 @@ def classify(tags: Mapping[str, str]) -> LineClass | None:
 STATION_KINDS = {"station": 9, "halt": 12, "urban": 13}
 
 
+URBAN_MODES = ("subway", "light_rail", "monorail")
+
+
 def station_kind(tags: Mapping[str, str]) -> str | None:
-    """'station', 'halt' or 'urban' (subway / light rail / monorail) - SPEC §7.6."""
+    """'station', 'halt' or 'urban' (subway / light rail / monorail) - SPEC §7.6.
+
+    Without a ``station`` tag the public-transport mode tags decide: a station
+    tagged only ``subway=yes`` (or light rail / monorail) is urban, one that
+    also has ``train=yes`` is a railway station.
+    """
     railway = tags.get("railway")
     if railway == "halt":
         return "halt"
-    if railway == "station":
-        return "urban" if tags.get("station") in ("subway", "light_rail", "monorail") else "station"
-    return None
+    if railway != "station":
+        return None
+    station = tags.get("station")
+    if station:
+        return "urban" if station in URBAN_MODES else "station"
+    if tags.get("train") != "yes" and any(tags.get(mode) == "yes" for mode in URBAN_MODES):
+        return "urban"
+    return "station"
