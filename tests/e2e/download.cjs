@@ -1,11 +1,13 @@
 // M3 check with real data: download one cell from a public Overpass server,
 // then look at it at several zoom levels.  Makes one real Overpass query.
 //   node tests/e2e/download.cjs <cell-id> <screenshot-prefix>
+// E2E_SETTINGS (settings.ini text) points the program elsewhere, e.g. at a
+// local Overpass stand-in.
 const { openPage } = require('./harness.cjs');
 
 (async () => {
   const [cell = '210-97', prefix] = process.argv.slice(2);
-  const { page, problems, close } = await openPage();
+  const { page, problems, close } = await openPage({ settings: process.env.E2E_SETTINGS });
   const expect = (cond, msg) => { if (!cond) problems.push(msg); };
   try {
     await page.waitForSelector('body[data-map-ready="true"]', { timeout: 30000 });
