@@ -118,6 +118,21 @@ def test_overloaded_server_leads_to_split_and_dedup(home, fake):
     store.close()
 
 
+def test_parts_of_a_refused_size_are_split_without_asking(home, fake):
+    def route(rec):
+        south, west, north, east = (float(v) for v in bbox_of(rec).split(","))
+        # areas wider than a z10 tile (0.35 degrees) are refused
+        return (504, {}, b"") if east - west > 0.6 else reply([{"type": "way", "id": 1}])
+
+    fake.routes["/a"] = route
+    client, store = make_client(home, [fake.url + "/a"])
+    client.fetch_cell(210, 97, threading.Event(), lambda p: None)
+    # z8 refused, first z9 refused, then all 16 z10 parts; the other three z9
+    # parts are split straight away instead of being tried first
+    assert len(fake.requests) == 1 + 1 + 16
+    store.close()
+
+
 def test_runtime_error_remark_counts_as_overload(home, fake):
     def route(rec):
         if whole_cell(rec):
@@ -150,8 +165,8 @@ def test_area_that_never_works_fails(home, fake):
     client, store = make_client(home, [fake.url + "/a"])
     with pytest.raises(QueryFailed):
         client.fetch_cell(210, 97, threading.Event(), lambda p: None)
-    # depth first: whole cell (z8) -> first quarter (z9) -> its first quarter (z10) -> give up
-    assert len(fake.requests) == 3
+    # depth first: whole cell (z8) -> first quarter (z9) -> z10 -> z11 -> give up
+    assert len(fake.requests) == 4
     store.close()
 
 
@@ -161,9 +176,10 @@ def test_busy_servers_are_retried_then_reported(home, fake):
     client, store = make_client(home, [fake.url + "/a", fake.url + "/b"], busy_seconds=30)
     with pytest.raises(ServersBusy):
         client.fetch_cell(210, 97, threading.Event(), lambda p: None)
-    # three rounds over both servers, never split into smaller areas
-    assert len(fake.requests) == 6
-    assert all(whole_cell(r) for r in fake.requests)
+    # z8, z9, z10: two busy rounds over both servers, then split;
+    # z11 (smallest part): three rounds, then give up for now
+    assert len(fake.requests) == 4 + 4 + 4 + 6
+    assert sum(whole_cell(r) for r in fake.requests) == 4
     store.close()
 
 
@@ -172,11 +188,21 @@ def test_busy_server_recovers(home, fake):
 
     def route(rec):
         calls.append(1)
-        return (504, {}, b"busy") if len(calls) < 3 else reply([{"type": "way", "id": 4}])
+        return (504, {}, b"busy") if len(calls) < 2 else reply([{"type": "way", "id": 4}])
 
     fake.routes["/a"] = route
     client, store = make_client(home, [fake.url + "/a"], busy_seconds=30)
     assert client.fetch_cell(1, 1, threading.Event(), lambda p: None) == [{"type": "way", "id": 4}]
+    assert len(calls) == 2, "one busy answer, then the same area succeeds without splitting"
+    store.close()
+
+
+def test_area_refused_as_a_whole_is_split(home, fake):
+    """mail.ru-like behaviour: large areas get a fast 504, small ones work."""
+    fake.routes["/a"] = lambda r: (504, {}, b"busy") if whole_cell(r) else reply([{"type": "way", "id": 7}])
+    client, store = make_client(home, [fake.url + "/a"], busy_seconds=30)
+    assert client.fetch_cell(210, 97, threading.Event(), lambda p: None) == [{"type": "way", "id": 7}]
+    assert len(fake.requests) == 2 + 4
     store.close()
 
 

@@ -4,11 +4,13 @@
 * 429 -> wait for Retry-After (60 s if absent), up to 3 times per server,
   then the next server;
 * a 502/503/504 that comes back quickly means the server is busy: try the
-  next server; when every server is busy, wait (30 s ... 5 min) and try again;
-  in the end ``ServersBusy`` (the cell goes back to the queue, not failed);
+  next server; when every server is busy, wait (30 s, 60 s) and try again;
+  if they are still busy the area is split (servers often accept smaller
+  queries); at the smallest size keep waiting (up to 5 min) and finally
+  raise ``ServersBusy`` (the cell goes back to the queue, not failed);
 * a timeout, a slow 504 or "out of memory" means the area is too heavy: one
-  more server, then the area is split into 4 (z9) and, if needed, 16 (z10)
-  parts;
+  more server, then the area is split into 4 (z9), 16 (z10) and, if needed,
+  64 (z11) parts;
 * connection failures on every server -> ``Offline`` (not a cell failure);
   a server that could not be reached is tried last for the next 10 minutes;
 * per-server daily budget (requests and bytes) -> ``BudgetExhausted``.
@@ -41,12 +43,15 @@ READ_TIMEOUT = 330
 MAX_RESPONSE = 200 * 1024 * 1024
 DAILY_REQUESTS = 9000
 DAILY_BYTES = 900 * 1024 * 1024
-MAX_SPLIT_ZOOM = 10
+MAX_SPLIT_ZOOM = 11  # a cell may be split into at most 64 parts
 MIN_INTERVAL = 1.0
 MAX_429_RETRIES = 3
 HEAVY_FAILURES_BEFORE_SPLIT = 2
 BUSY_RESPONSE_SECONDS = 30.0  # a 5xx faster than this means "busy", not "too heavy"
 BUSY_BACKOFF = (30.0, 60.0, 120.0, 240.0, 300.0)
+# A server that keeps refusing a large area at once often accepts smaller ones,
+# so after this many busy rounds the area is split if it still can be.
+BUSY_ROUNDS_BEFORE_SPLIT = 2
 DOWN_FOR = 600.0
 
 
@@ -116,15 +121,21 @@ class OverpassClient:
         found: dict[tuple[str, int], dict] = {}
         pending = [(CELL_ZOOM, x, y, 1.0)]
         done = 0.0
+        heavy_zoom = -1  # deepest part size of this cell that the servers refused
         while pending:
             z, tx, ty, weight = pending.pop(0)
+            children = [(z + 1, 2 * tx + dx, 2 * ty + dy, weight / 4) for dy in (0, 1) for dx in (0, 1)]
+            if z <= heavy_zoom and z < MAX_SPLIT_ZOOM:
+                # a part of this size was already refused: go straight to smaller parts
+                pending[0:0] = children
+                continue
             try:
-                elements = self._query_area(tile_bounds(z, tx, ty), cancel)
+                elements = self._query_area(tile_bounds(z, tx, ty), cancel, can_split=z < MAX_SPLIT_ZOOM)
             except _NeedsSplit as exc:
                 if z >= MAX_SPLIT_ZOOM:
                     raise QueryFailed(f"Overpass 服务器拆分查询后仍无法提供该区域的数据（{exc}）") from None
                 log.info("splitting %d/%d/%d after: %s", z, tx, ty, exc)
-                children = [(z + 1, 2 * tx + dx, 2 * ty + dy, weight / 4) for dy in (0, 1) for dx in (0, 1)]
+                heavy_zoom = max(heavy_zoom, z)
                 pending[0:0] = children
                 continue
             for element in elements:
@@ -165,7 +176,7 @@ class OverpassClient:
             e for e in endpoints if self._down_until.get(e, 0) > now
         ]
 
-    def _query_area(self, bounds, cancel: threading.Event) -> list[dict]:
+    def _query_area(self, bounds, cancel: threading.Event, can_split: bool = True) -> list[dict]:
         query = build_query(bounds)
         for attempt in range(len(self.busy_backoff) + 1):
             tried = connection_failures = heavy_failures = busy = 0
@@ -217,7 +228,9 @@ class OverpassClient:
                 raise Offline("no Overpass server can be reached")
             if heavy_failures:
                 raise _NeedsSplit(last_problem)
-            # every reachable server was busy: wait, then try again
+            # every reachable server was busy: split if possible, otherwise wait and retry
+            if can_split and attempt + 1 >= BUSY_ROUNDS_BEFORE_SPLIT:
+                raise _NeedsSplit(f"servers keep refusing this area ({last_problem})")
             if attempt < len(self.busy_backoff):
                 log.info("all Overpass servers busy, waiting %.0f s", self.busy_backoff[attempt])
                 self._wait(self.busy_backoff[attempt], cancel)
