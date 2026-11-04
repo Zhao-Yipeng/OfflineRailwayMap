@@ -1,0 +1,85 @@
+:root {
+  --panel-bg: rgba(255, 255, 255, 0.95);
+  --panel-border: #c9ced6;
+  --text: #1f2328;
+  --muted: #59636e;
+  --accent: #0969da;
+  --accent-hover: #0757b8;
+  --danger: #cf222e;
+  --ok: #1a7f37;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
+  --radius: 6px;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  font-size: 14px;
+  color: var(--text);
+}
+
+html, body { margin: 0; height: 100%; overflow: hidden; }
+#map { position: absolute; inset: 0; background: #e8e8e8; }
+#ui { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+#ui > * { pointer-events: none; }
+#ui button, #ui .panel, #ui input, #ui a { pointer-events: auto; }
+
+.corner { position: absolute; display: flex; gap: 8px; }
+.top-left { top: 12px; left: 12px; flex-direction: column; align-items: flex-start; width: 320px; }
+.top-right { top: 12px; right: 12px; }
+.bottom-left { bottom: 12px; left: 12px; flex-direction: column; align-items: flex-start; }
+.bottom-right { bottom: 12px; right: 12px; flex-direction: column; align-items: flex-end; }
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--panel-border);
+  background: var(--panel-bg);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+button:hover { background: #f3f4f6; }
+button:disabled { opacity: 0.55; cursor: default; }
+button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--accent-hover); }
+button.danger { color: var(--danger); }
+button[aria-pressed="true"] { background: #ddf4ff; border-color: #54aeff; }
+button.link { background: none; border: none; box-shadow: none; padding: 0; color: var(--accent); text-decoration: underline; }
+
+.search { width: 100%; }
+.search input {
+  box-sizing: border-box; width: 100%; border: none; background: transparent;
+  font: inherit; padding: 8px 10px; outline: none;
+}
+.results { width: 100%; max-height: 60vh; overflow: auto; }
+
+.status-line { display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
+.scale { display: inline-flex; align-items: center; gap: 6px; }
+.scale-bar { display: inline-block; height: 6px; border: 1.5px solid #333; border-top: none; }
+.net-status[data-state="offline"] { color: var(--danger); font-weight: 600; }
+.net-status[data-state="degraded"] { color: #9a6700; font-weight: 600; }
+
+.attribution { font-size: 11px; color: var(--muted); padding: 2px 8px; max-width: 70vw; text-align: right; }
+.attribution a { color: var(--muted); }
+
+.legend { position: absolute; top: 52px; right: 12px; max-height: calc(100% - 160px); overflow: auto; padding: 8px 12px; font-size: 12px; pointer-events: auto; }
+.download-panel { position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; padding: 8px 12px; min-width: 360px; max-width: 46vw; pointer-events: auto; }
+.edit-bar { position: absolute; left: 50%; transform: translateX(-50%); top: 12px; padding: 6px 12px; pointer-events: auto; }
+
+#modal-root:empty { display: none; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.modal { min-width: 360px; max-width: 560px; padding: 18px 20px; }
+.modal h2 { margin: 0 0 10px; font-size: 16px; }
+.modal p { margin: 0 0 12px; line-height: 1.6; white-space: pre-line; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+#toast-root { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 11; }
+.toast { padding: 8px 14px; }
+.toast.error { border-color: var(--danger); color: var(--danger); }
+
+.fatal { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #f6f8fa; font-size: 16px; z-index: 20; }

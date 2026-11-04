@@ -97,8 +97,8 @@ OfflineRailwayMap 是一个 Windows 桌面程序。它显示 OpenRailwayMap（�
 - **显卡**：需要 WebGL 2（MapLibre GL JS 5.x 的要求）。没有可用的 GPU 时，Qt WebEngine 会改用软件渲染。这种情况下程序必须能运行，但允许明显变慢。
 - **语言与框架**：
   - Python 3.12（64 位）。
-  - PySide6 6.8 LTS：用 Qt Widgets 做窗口外壳，Qt WebEngine 显示地图页面，Qt WebChannel 负责页面和 Python 之间的通信。
-  - 地图引擎：MapLibre GL JS 5.x。版本固定到具体的小版本，随程序一起打包，运行时不访问 CDN。
+  - PySide6 6.8 LTS：用 Qt Widgets 做窗口外壳，Qt WebEngine 显示地图页面。页面和 Python 之间通过本地服务通信（见 10.2）。
+  - 地图引擎：MapLibre GL JS 5.24.0（5.x 的最后一个版本）。随程序一起打包，运行时不访问 CDN。
   - Python 依赖：requests（HTTP）、shapely 2.x（几何裁切与简化）、mapbox-vector-tile（矢量瓦片编码）、标准库 sqlite3（使用 R*Tree 空间索引）。
   - 栅格瓦片的遮罩处理用 Qt 的 QImage，不另加图像库。
 - **前端**：普通的 HTML、CSS 和 JavaScript（ES modules），不需要构建步骤。所有第三方前端资源（MapLibre、离线底图样式、字形、图标）都随程序打包。
@@ -554,10 +554,12 @@ usage 和 service 取 `usage` 和 `service` 标签。如果没有，并且状态
 
 ### 10.2 页面与 Python 的通信
 
-使用 Qt WebChannel：
+通过本地 HTTP 服务（与瓦片同一个服务、同一个令牌）：
 
-- 页面调用 Python：选择方格、开始浏览、清空缓存、搜索、查询详情、读写设置。
-- Python 向页面推送事件：方格状态变化、下载进度、联网状态、瓦片版本号。
+- 页面调用 Python：用 `/api/...` 下的 JSON 接口，包括选择方格、开始浏览、清空缓存、搜索、查询详情、读写设置。
+- Python 向页面推送事件：用 Server-Sent Events（`/api/events`），包括方格状态变化、下载进度、联网状态、瓦片版本号。
+
+（最初计划用 Qt WebChannel。改用 HTTP 接口后，后端不依赖 Qt，可以不开窗口单独运行，前端能直接用浏览器连真实后端做端到端测试。用户可见的功能没有变化。）
 
 ### 10.3 在线瓦片转发
 
@@ -587,7 +589,7 @@ usage 和 service 取 `usage` 和 `service` 标签。如果没有，并且状态
 ### 10.6 页面的网络隔离
 
 - 页面使用 Qt WebEngine 的无痕（off-the-record）配置：只用内存缓存，不保存 Cookie 和网站存储。
-- 用请求拦截器拒绝页面发往本地服务以外的所有请求（Qt 内置的 `qrc:` 资源除外，例如 qwebchannel.js）。这样所有对外访问都经过 Python，User-Agent、缓存和限速才能统一。
+- 用请求拦截器拒绝页面发往本地服务以外的所有请求（`data:`、`blob:` 等页面内部地址除外）。这样所有对外访问都经过 Python，User-Agent、缓存和限速才能统一。
 - 详情和署名中的外部链接用系统浏览器打开，不在程序内打开。
 
 ---

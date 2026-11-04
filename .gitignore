@@ -1,0 +1,17 @@
+# Program data written at runtime (SPEC §11)
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Build output
+/build/
+/dist/
+
+# Node (only used by tools/ when vendoring assets)
+node_modules/
