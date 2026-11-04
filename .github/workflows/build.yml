@@ -2,10 +2,15 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch replaces a build that is still running.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
