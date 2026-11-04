@@ -513,19 +513,36 @@ export class Cells {
 }
 
 export function downloadSummary(cells) {
-  let active = 0, cached = 0, failed = 0, current = null;
+  let active = 0, cached = 0, failed = 0, bytes = 0, current = null;
   for (const row of cells.cells.values()) {
     if (['queued', 'downloading', 'updating'].includes(row.status) && (row.status !== 'updating' || row.updateKind)) active += 1;
     if (row.status === 'cached') cached += 1;
     if (row.status === 'failed') failed += 1;
     if (row.status === 'downloading' || (row.status === 'updating' && row.stage)) current = row;
+    bytes += row.bytes || 0;
   }
-  return { active, cached, failed, current };
+  return { active, cached, failed, bytes, current };
+}
+
+// Rough remaining time from the cells finished during this session (SPEC §6.5).
+const finished = [];
+let lastCached = null;
+function remainingText(cached, active) {
+  const now = Date.now();
+  if (lastCached !== null && cached > lastCached) for (let i = lastCached; i < cached; i++) finished.push(now);
+  lastCached = cached;
+  if (finished.length < 2 || !active) return '';
+  const recent = finished.slice(-20);
+  const perCell = (recent[recent.length - 1] - recent[0]) / (recent.length - 1);
+  const minutes = Math.round((perCell * active) / 60000);
+  if (minutes < 1) return ' · 剩余不到 1 分钟';
+  return minutes < 120 ? ` · 约剩 ${minutes} 分钟` : ` · 约剩 ${Math.round(minutes / 60)} 小时`;
 }
 
 export function renderDownloadPanel(cells) {
   const panel = $('download-panel');
-  const { active, cached, failed, current } = downloadSummary(cells);
+  const { active, cached, failed, bytes, current } = downloadSummary(cells);
+  const eta = remainingText(cached, active);
   if (!active && !failed) {
     panel.hidden = true;
     return;
@@ -538,6 +555,7 @@ export function renderDownloadPanel(cells) {
       const stage = STAGE_LABELS[current.stage] || '准备';
       parts.push(el('span', {}, ` · ${current.id} ${stage} ${Math.round((current.progress || 0) * 100)}%`));
     }
+    parts.push(el('span', { class: 'muted' }, ` · 已下载 ${formatBytes(bytes)}${cells.paused ? '' : eta}`));
     parts.push(el('button', {
       type: 'button',
       onclick: () => api.post('/api/downloads/pause', { paused: !cells.paused }).catch((e) => toast(e.message, 'error')),
