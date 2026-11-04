@@ -12,7 +12,10 @@ import time
 from contextlib import contextmanager
 from typing import Iterator
 
+from .grid import distance_km
 from .paths import Home
+
+SAME_STATION_KM = 1.0  # same name and kind closer than this: one search result
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -240,16 +243,33 @@ class StateStore:
             )
 
     def search_stations(self, text: str, limit: int = 20) -> list[dict]:
+        """Cached stations whose name contains ``text``.
+
+        A station mapped several times (e.g. once per metro line, or found in
+        two neighbouring cells) is listed once: same name and kind, < 1 km apart.
+        """
         needle = text.strip().lower()
         if not needle:
             return []
         rows = self._read(
             "SELECT cell, osm_type, osm_id, kind, name, lon, lat FROM stations "
-            "WHERE instr(lower(name), ?) > 0 ORDER BY length(name), name LIMIT ?",
-            (needle, limit),
+            "WHERE instr(lower(name), ?) > 0 ORDER BY length(name), name, osm_type, osm_id LIMIT ?",
+            (needle, limit * 5),
         )
         keys = ("cell", "osmType", "osmId", "kind", "name", "lon", "lat")
-        return [dict(zip(keys, row)) for row in rows]
+        found: list[dict] = []
+        for row in rows:
+            item = dict(zip(keys, row))
+            if any(
+                f["name"] == item["name"] and f["kind"] == item["kind"]
+                and distance_km(f["lon"], f["lat"], item["lon"], item["lat"]) < SAME_STATION_KM
+                for f in found
+            ):
+                continue
+            found.append(item)
+            if len(found) == limit:
+                break
+        return found
 
     def reset_interrupted(self) -> None:
         """After a restart, cells that were mid-download go back to the queue."""

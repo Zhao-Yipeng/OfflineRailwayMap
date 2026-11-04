@@ -62,6 +62,25 @@ def test_search_offline_uses_local_stations_only(client, core, services):
     assert services.requests == []
 
 
+def test_local_search_lists_a_station_mapped_twice_once(home):
+    from offline_railway_map.store import StateStore
+
+    store = StateStore(home)
+    store.replace_stations("210-97", [
+        ("node", 1, "urban", "北京南站", 116.3790, 39.8650),  # metro line 4
+        ("node", 2, "urban", "北京南站", 116.3800, 39.8640),  # metro line 14, 140 m away
+        ("node", 3, "station", "北京南", 116.3785, 39.8652),
+        ("node", 4, "station", "北京南站", 116.3790, 39.8650),  # other kind: kept
+        ("node", 5, "urban", "北京南站", 117.2000, 39.1000),  # same name far away: kept
+    ])
+    store.replace_stations("210-96", [("node", 3, "station", "北京南", 116.3785, 39.8652)])  # on the border
+    found = [(s["osmId"], s["name"], s["kind"]) for s in store.search_stations("北京南")]
+    assert found == [(3, "北京南", "station"), (1, "北京南站", "urban"), (4, "北京南站", "station"),
+                     (5, "北京南站", "urban")]
+    assert len(store.search_stations("北京南", limit=2)) == 2
+    store.close()
+
+
 def test_orm_rate_limit_pauses_the_api(client, services):
     services.routes["/orm"] = lambda r: (429, {}, b"")
     status, result = client.get_json("/api/search?q=abc")
