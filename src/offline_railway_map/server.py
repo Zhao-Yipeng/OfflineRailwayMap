@@ -93,10 +93,17 @@ class Router:
 
 
 class LocalServer:
-    def __init__(self, router: Router, static_dir: Path, port: int = 0) -> None:
+    """One listening port.  The program runs two: the main one (page, API,
+    local tiles) and one for online tiles, so that slow internet requests never
+    use up the browser's per-host connections needed for local data."""
+
+    def __init__(self, router: Router, static_dir: Path | None, port: int = 0, token: str | None = None) -> None:
         self.router = router
-        self.static_dir = Path(static_dir).resolve()
-        self.token = secrets.token_hex(16)
+        self.static_dir = Path(static_dir).resolve() if static_dir else None
+        self.token = token or secrets.token_hex(16)
+        # Origin of the page allowed to read responses from this port (the
+        # online-tile port is a different origin than the page).
+        self.cors_origin: str | None = None
         self._requested_port = port
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -142,9 +149,9 @@ class LocalServer:
             return error_response(404, "not found")
         path = unquote(parts.path[len(prefix):]) or "/"
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        if path == "/" or path == "/app":
+        if self.static_dir is not None and path in ("/", "/app"):
             return Response(302, headers={"Location": f"{prefix}/app/index.html"})
-        if path.startswith("/app/"):
+        if self.static_dir is not None and path.startswith("/app/"):
             if method not in ("GET", "HEAD"):
                 return error_response(405, "method not allowed")
             return self._static(path[len("/app/"):])
@@ -155,6 +162,7 @@ class LocalServer:
         return handler(request)
 
     def _static(self, relative: str) -> Response:
+        assert self.static_dir is not None
         if not relative or relative.endswith("/"):
             relative += "index.html"
         target = (self.static_dir / relative).resolve()
@@ -205,6 +213,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.local.cors_origin:
+            self.send_header("Access-Control-Allow-Origin", self.local.cors_origin)
         for key, value in response.headers.items():
             self.send_header(key, value)
         if response.stream is not None:

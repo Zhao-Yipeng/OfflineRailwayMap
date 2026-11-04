@@ -67,9 +67,9 @@ class QtHooks(ShellHooks):
 class LocalOnlyInterceptor(QWebEngineUrlRequestInterceptor):
     """Blocks every page request that does not go to the local server."""
 
-    def __init__(self, prefix: str, parent: QObject) -> None:
+    def __init__(self, origins: list[str], parent: QObject) -> None:
         super().__init__(parent)
-        self.prefix = prefix
+        self.prefixes = tuple(origin + "/" for origin in origins)
         self.blocked: list[str] = []
 
     def interceptRequest(self, info) -> None:  # noqa: N802 - Qt API
@@ -77,7 +77,7 @@ class LocalOnlyInterceptor(QWebEngineUrlRequestInterceptor):
         if url.scheme() in ("qrc", "data", "blob", "about"):
             return
         text = url.toString()
-        if text.startswith(self.prefix):
+        if text.startswith(self.prefixes):
             return
         self.blocked.append(text)
         log.warning("blocked page request to %s", text)
@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
         self.profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
         self.profile.setSpellCheckEnabled(False)
-        self.interceptor = LocalOnlyInterceptor(core.server.origin + "/", self)
+        self.interceptor = LocalOnlyInterceptor(core.allowed_origins, self)
         self.profile.setUrlRequestInterceptor(self.interceptor)
         self.page = Page(self.profile, self.view, core.server.base_url + "/")
         self.view.setPage(self.page)

@@ -1,8 +1,8 @@
 """Backend wiring: services, API routes and lifecycle.
 
-The backend has no Qt dependency so it can run headless (``--serve``) and be
-driven by a normal browser in tests.  The window shell supplies ``ShellHooks``
-for the few things only it can do.
+The backend has no window dependency so it can run headless (``--serve``) and
+be driven by a normal browser in tests.  The window shell supplies
+``ShellHooks`` for the few things only it can do.
 """
 
 from __future__ import annotations
@@ -12,12 +12,17 @@ import webbrowser
 from urllib.parse import urlsplit
 
 from . import APP_NAME, __version__
+from .coverage import CellCoverage
 from .events import EventBus, frame
+from .net import Http, NetStatus
+from .online_tiles import OnlineTiles
 from .paths import Home, web_dir
 from .server import LocalServer, Request, Response, Router, error_response, json_response
 from .settings import Settings
 
 log = logging.getLogger(__name__)
+
+PNG_HEADERS = {"Cache-Control": "no-store"}
 
 
 class ShellHooks:
@@ -39,8 +44,15 @@ class AppCore:
         self.settings = settings
         self.hooks = hooks or ShellHooks()
         self.events = EventBus()
+        self.http = Http(per_host=2)
+        self.status = NetStatus(self.events)
+        self.coverage = CellCoverage()
+        self.online = OnlineTiles(home, self.http, self.status, self.coverage, lambda: self.settings.online_cache_limit_mb)
+
         self.router = Router()
         self.server = LocalServer(self.router, web_dir(), port=port)
+        self.online_router = Router()
+        self.online_server = LocalServer(self.online_router, None, token=self.server.token)
         self._register_routes()
 
     # -- lifecycle -------------------------------------------------------------------
@@ -48,11 +60,19 @@ class AppCore:
     def start(self) -> str:
         """Start serving; return the URL of the page."""
         self.server.start()
+        self.online_server.start()
+        self.online_server.cors_origin = self.server.origin
         return f"{self.server.base_url}/app/index.html"
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        return [self.server.origin, self.online_server.origin]
 
     def shutdown(self) -> None:
         self.events.close()
         self.server.stop()
+        self.online_server.stop()
+        self.online.close()
         self.settings.save_if_data_exists(self.home)
 
     # -- routes ----------------------------------------------------------------------
@@ -64,6 +84,9 @@ class AppCore:
         add("POST", "/api/open-external", self._api_open_external)
         add("POST", "/api/fatal", self._api_fatal)
         add("GET", "/api/events", self._api_events)
+        self.online_router.add(
+            "GET", r"/tiles/(?P<source>osm|orm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.png", self._tile_online
+        )
 
     def _api_info(self, _req: Request) -> Response:
         lon, lat, zoom = self.settings.initial_view()
@@ -71,10 +94,11 @@ class AppCore:
             {
                 "app": APP_NAME,
                 "version": __version__,
-                "origin": self.server.origin,
                 "base": f"/{self.server.token}",
+                "onlineOrigin": self.online_server.origin,
                 "view": {"lon": lon, "lat": lat, "zoom": zoom},
                 "settings": self.settings.public_dict(),
+                "status": self.status.snapshot(),
             }
         )
 
@@ -103,10 +127,15 @@ class AppCore:
         return json_response({"ok": True})
 
     def _api_events(self, _req: Request) -> Response:
-        initial = [frame("hello", {"version": __version__})]
+        initial = [frame("hello", {"version": __version__}), frame("status", self.status.snapshot())]
         return Response(
             200,
             content_type="text/event-stream; charset=utf-8",
             headers={"Cache-Control": "no-store"},
             stream=self.events.stream(initial),
         )
+
+    def _tile_online(self, req: Request) -> Response:
+        p = req.params
+        data = self.online.tile(p["source"], int(p["z"]), int(p["x"]), int(p["y"]))
+        return Response(200, data, "image/png", PNG_HEADERS)

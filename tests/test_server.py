@@ -75,6 +75,9 @@ def test_event_stream_says_hello(core):
     payload = json.loads(next(line for line in lines if line.startswith(b"data:"))[5:])
     assert "version" in payload
     core.events.publish("cells", {"n": 1})
-    more = [response.fp.readline() for _ in range(3)]
+    more = []
+    while b"event: cells\n" not in more and len(more) < 20:
+        more.append(response.fp.readline())
     assert b"event: cells\n" in more
+    assert b"event: status\n" in lines + more, "the stream starts with the current connectivity status"
     conn.close()

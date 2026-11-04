@@ -1,7 +1,8 @@
 // Page entry point.
-import { api, subscribe } from './api.js';
+import { api, setOnlineOrigin, subscribe } from './api.js';
+import { addGroupMarkers, addOnlineLayers } from './layers.js';
 import { createMap } from './map.js';
-import { $, attachScale, renderAttribution, showFatal } from './ui.js';
+import { $, attachScale, renderAttribution, renderStatus, showFatal } from './ui.js';
 
 function hasWebGL2() {
   try {
@@ -29,13 +30,22 @@ async function boot() {
     return;
   }
   const info = await api.get('/api/info');
+  setOnlineOrigin(info.onlineOrigin);
   const map = createMap(info);
   window.__map = map; // handy for debugging and end-to-end tests
   renderAttribution();
+  renderStatus(info.status);
   attachScale(map);
   rememberView(map);
-  subscribe({ hello: () => { document.body.dataset.connected = 'true'; } });
-  map.on('load', () => { document.body.dataset.mapReady = 'true'; });
+  subscribe({
+    hello: () => { document.body.dataset.connected = 'true'; },
+    status: renderStatus,
+  });
+  map.on('load', () => {
+    addGroupMarkers(map);
+    addOnlineLayers(map);
+    document.body.dataset.mapReady = 'true';
+  });
   $('btn-mode').disabled = true;
   $('btn-clear').disabled = true;
 }

@@ -10,6 +10,15 @@ export function url(path) {
   return `${ORIGIN}${BASE}${path}`;
 }
 
+// Online tiles come from a second local port (same token), see SPEC §10.1.
+let onlineOrigin = ORIGIN;
+export function setOnlineOrigin(origin) {
+  onlineOrigin = origin;
+}
+export function onlineUrl(path) {
+  return `${onlineOrigin}${BASE}${path}`;
+}
+
 async function request(method, path, body) {
   const init = { method, headers: {} };
   if (body !== undefined) {
