@@ -32,14 +32,17 @@ from .store import StateStore
 log = logging.getLogger(__name__)
 
 QUERY = (
-    "[out:json][timeout:300][maxsize:1073741824];\n"
+    "[out:json][timeout:{timeout}][maxsize:1073741824];\n"
     'way["railway"~"^(rail|narrow_gauge|subway|light_rail|tram|construction|proposed|disused)$"]({s},{w},{n},{e});\n'
     "out tags geom;\n"
     'nwr["railway"~"^(station|halt)$"]({s},{w},{n},{e});\n'
     "out tags center;"
 )
 CONNECT_TIMEOUT = 20
-READ_TIMEOUT = 330
+# Server-side timeout per part size: smaller parts should be quick, and a
+# shorter limit lets a stuck server be left sooner.  Client waits 30 s longer.
+SERVER_TIMEOUT = {8: 300, 9: 240, 10: 180, 11: 120}
+READ_MARGIN = 30
 MAX_RESPONSE = 200 * 1024 * 1024
 DAILY_REQUESTS = 9000
 DAILY_BYTES = 900 * 1024 * 1024
@@ -86,9 +89,9 @@ class _HttpError(Exception):
         self.retry_after = retry_after
 
 
-def build_query(bounds: tuple[float, float, float, float]) -> str:
+def build_query(bounds: tuple[float, float, float, float], timeout: int = 300) -> str:
     west, south, east, north = bounds
-    return QUERY.format(s=f"{south:.7f}", w=f"{west:.7f}", n=f"{north:.7f}", e=f"{east:.7f}")
+    return QUERY.format(timeout=timeout, s=f"{south:.7f}", w=f"{west:.7f}", n=f"{north:.7f}", e=f"{east:.7f}")
 
 
 class OverpassClient:
@@ -130,7 +133,9 @@ class OverpassClient:
                 pending[0:0] = children
                 continue
             try:
-                elements = self._query_area(tile_bounds(z, tx, ty), cancel, can_split=z < MAX_SPLIT_ZOOM)
+                elements = self._query_area(
+                    tile_bounds(z, tx, ty), cancel, can_split=z < MAX_SPLIT_ZOOM, timeout=SERVER_TIMEOUT.get(z, 120)
+                )
             except _NeedsSplit as exc:
                 if z >= MAX_SPLIT_ZOOM:
                     raise QueryFailed(f"Overpass 服务器拆分查询后仍无法提供该区域的数据（{exc}）") from None
@@ -176,8 +181,9 @@ class OverpassClient:
             e for e in endpoints if self._down_until.get(e, 0) > now
         ]
 
-    def _query_area(self, bounds, cancel: threading.Event, can_split: bool = True) -> list[dict]:
-        query = build_query(bounds)
+    def _query_area(self, bounds, cancel: threading.Event, can_split: bool = True, timeout: int = 300) -> list[dict]:
+        query = build_query(bounds, timeout)
+        read_timeout = timeout + READ_MARGIN
         for attempt in range(len(self.busy_backoff) + 1):
             tried = connection_failures = heavy_failures = busy = 0
             last_problem = "no server available"
@@ -190,7 +196,7 @@ class OverpassClient:
                     self._pace(cancel)
                     started = time.monotonic()
                     try:
-                        return self._post(endpoint, query, cancel)
+                        return self._post(endpoint, query, cancel, read_timeout)
                     except requests.ConnectionError as exc:
                         connection_failures += 1
                         self._down_until[endpoint] = time.monotonic() + DOWN_FOR
@@ -236,9 +242,9 @@ class OverpassClient:
                 self._wait(self.busy_backoff[attempt], cancel)
         raise ServersBusy(f"Overpass servers are busy ({last_problem})")
 
-    def _post(self, endpoint: str, query: str, cancel: threading.Event) -> list[dict]:
+    def _post(self, endpoint: str, query: str, cancel: threading.Event, read_timeout: float = 330) -> list[dict]:
         response = self.session.post(
-            endpoint, data={"data": query}, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True
+            endpoint, data={"data": query}, timeout=(CONNECT_TIMEOUT, read_timeout), stream=True
         )
         with response:
             if response.status_code != 200:
