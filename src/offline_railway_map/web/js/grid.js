@@ -381,6 +381,28 @@ export class Cells {
     tip.hidden = false;
   }
 
+  // The bar's elements are made once and then only updated: rebuilding them
+  // whenever the size estimate arrives could swallow a click on 「撤销本次更改」.
+  _editBarParts() {
+    if (this._bar) return this._bar;
+    const updateAll = async () => {
+      const ok = await confirmDialog({
+        title: '全部更新铁路数据',
+        message: `将重新下载全部 ${this._cachedCount} 个已缓存方格的铁路数据（底图不变）。更新期间继续显示旧数据。`,
+        okText: '开始更新',
+      });
+      if (ok) api.post('/api/cells/update-all').catch((e) => toast(e.message, 'error'));
+    };
+    this._bar = {
+      counts: el('span', {}),
+      undo: el('button', { type: 'button', class: 'link undo', onclick: () => this.discardEdits() }, '撤销本次更改'),
+      updateAll: el('button', { type: 'button', class: 'link', onclick: updateAll }, '全部更新铁路数据'),
+      hint: el('span', { class: 'hint' }, '单击选择 · Shift+拖动框选 · Alt+拖动取消 · 右键已缓存方格可更新或删除'),
+    };
+    $('edit-bar').replaceChildren(this._bar.counts, this._bar.undo, this._bar.updateAll, this._bar.hint);
+    return this._bar;
+  }
+
   _renderEditBar() {
     const bar = $('edit-bar');
     if (this.mode !== 'edit') {
@@ -391,24 +413,15 @@ export class Cells {
     for (const row of this.cells.values()) {
       if (row.status === 'cached' || row.status === 'updating') { cached += 1; bytes += row.bytes || 0; }
     }
-    const changes = this.pendingAdd.size + this.pendingRemove.size;
-    const updateAll = async () => {
-      const ok = await confirmDialog({
-        title: '全部更新铁路数据',
-        message: `将重新下载全部 ${cached} 个已缓存方格的铁路数据（底图不变）。更新期间继续显示旧数据。`,
-        okText: '开始更新',
-      });
-      if (ok) api.post('/api/cells/update-all').catch((e) => toast(e.message, 'error'));
-    };
+    const parts = this._editBarParts();
+    this._cachedCount = cached;
     this._scheduleEstimate();
-    bar.replaceChildren(...[
-      el('span', {}, `新增 ${this.pendingAdd.size} 格${this._estimateText()} · 将删除 ${this.pendingRemove.size} 格 · 已缓存 ${cached} 格（共 ${formatBytes(bytes)}）`),
-      changes ? el('button', { type: 'button', class: 'link undo', onclick: () => this.discardEdits() }, '撤销本次更改') : null,
-      cached ? el('button', { type: 'button', class: 'link', onclick: updateAll }, '全部更新铁路数据') : null,
-      el('span', { class: 'hint' }, '单击选择 · Shift+拖动框选 · Alt+拖动取消 · 右键已缓存方格可更新或删除'),
-    ].filter(Boolean));
+    parts.counts.textContent = `新增 ${this.pendingAdd.size} 格${this._estimateText()} · 将删除 ${this.pendingRemove.size} 格 · 已缓存 ${cached} 格（共 ${formatBytes(bytes)}）`;
+    parts.undo.hidden = this.pendingAdd.size + this.pendingRemove.size === 0;
+    parts.updateAll.hidden = cached === 0;
     bar.hidden = false;
   }
+
 
   // -- interaction -------------------------------------------------------------------------
 

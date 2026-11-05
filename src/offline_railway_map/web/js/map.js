@@ -4,6 +4,10 @@ import { url } from './api.js';
 
 export const MIN_ZOOM = 2;
 export const MAX_ZOOM = 19;
+// Mouse wheel: about 0.9 zoom levels per notch, close to the OpenRailwayMap
+// website (Leaflet, 1 level per notch).  MapLibre's default (1/450) gives only
+// about 0.15 per notch on Windows, which feels very slow.
+const WHEEL_ZOOM_RATE = 1 / 40;
 
 // CJK labels are drawn with Windows system fonts instead of bundled glyphs (SPEC §7.7).
 export const LOCAL_IDEOGRAPH_FONTS = "'Microsoft YaHei UI', 'Microsoft YaHei', 'Yu Gothic UI', 'Malgun Gothic', sans-serif";
@@ -41,5 +45,6 @@ export function createMap(info) {
   });
   map.touchZoomRotate.disableRotation();
   map.keyboard.disableRotation();
+  map.scrollZoom.setWheelZoomRate(WHEEL_ZOOM_RATE);
   return map;
 }

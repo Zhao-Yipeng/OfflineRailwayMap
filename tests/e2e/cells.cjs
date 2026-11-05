@@ -6,6 +6,11 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
   const [shotEdit, shotBrowse] = process.argv.slice(2);
   const { page, problems, close } = await openPage({ settings: OFFLINE_DOWNLOADS });
   const expect = (cond, msg) => { if (!cond) problems.push(msg); };
+  // The edit bar is redrawn on the next animation frame, which can take a
+  // while with software rendering: wait for the text instead of sleeping.
+  const barShows = async (text) => page.waitForFunction(
+    (t) => document.getElementById('edit-bar').textContent.includes(t), text, { timeout: 10000 },
+  ).then(() => true, () => false);
   try {
     await page.waitForSelector('body[data-map-ready="true"]', { timeout: 30000 });
     expect((await page.getAttribute('body', 'data-mode')) === 'edit', 'starts in edit mode without cells');
@@ -17,9 +22,9 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
     const box = await page.locator('#map canvas').boundingBox();
     const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
     await page.mouse.click(cx, cy);
-    await page.waitForTimeout(200);
+    const one = await barShows('新增 1 格');
     let bar = await page.textContent('#edit-bar');
-    expect(bar.includes('新增 1 格'), `one cell selected by click: ${bar}`);
+    expect(one, `one cell selected by click: ${bar}`);
 
     // Shift+drag a rectangle of cells.
     await page.keyboard.down('Shift');
@@ -28,7 +33,8 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
     await page.mouse.move(cx + 200, cy + 150, { steps: 5 });
     await page.mouse.up();
     await page.keyboard.up('Shift');
-    await page.waitForTimeout(200);
+    await page.waitForFunction(() => !document.getElementById('edit-bar').textContent.includes('新增 1 格'), null, { timeout: 10000 })
+      .catch(() => {});
     bar = await page.textContent('#edit-bar');
     const added = Number((bar.match(/新增 (\d+) 格/) || [])[1]);
     expect(added > 1, `rectangle selection added cells: ${bar}`);
@@ -38,10 +44,10 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
 
     // Undo, then select again and apply.
     await page.click('#edit-bar button.undo');
-    await page.waitForTimeout(200);
+    const cleared = await barShows('新增 0 格');
     bar = await page.textContent('#edit-bar');
     expect(!bar.includes('null'), `no stray text in the edit bar: ${bar}`);
-    expect(bar.includes('新增 0 格'), `undo clears pending edits: ${bar}`);
+    expect(cleared, `undo clears pending edits: ${bar}`);
     await page.mouse.click(cx, cy);
     await page.click('#btn-mode');
     await page.waitForSelector('body[data-mode="browse"]', { timeout: 5000 });

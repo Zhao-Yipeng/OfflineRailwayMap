@@ -94,9 +94,9 @@ export function renderAttribution() {
   );
 }
 
-/** Keep the download panel just above the attribution row, however many lines the attribution takes. */
+/** Keep the download panel just above the attribution, however many lines the attribution takes. */
 export function trackBottomRow() {
-  const row = document.querySelector('.corner.bottom-right');
+  const row = document.querySelector('.attribution-row');
   const update = () => document.documentElement.style.setProperty('--bottom-row-height', `${row.offsetHeight}px`);
   new ResizeObserver(update).observe(row);
   update();

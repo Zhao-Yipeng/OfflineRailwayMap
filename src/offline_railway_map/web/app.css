@@ -25,10 +25,15 @@ html, body { margin: 0; height: 100%; overflow: hidden; }
 .top-left { top: 12px; left: 12px; flex-direction: column; align-items: flex-start; width: 320px; }
 .top-right { top: 12px; right: 12px; }
 .bottom-left { bottom: 12px; left: 12px; flex-direction: column; align-items: flex-start; }
-/* Attribution to the left of the mode button; never wider than the space the
-   「清空缓存」 button leaves free. */
-.bottom-right { bottom: 12px; right: 12px; flex-direction: row; align-items: flex-end; max-width: calc(100vw - 150px); }
-.bottom-right > button { flex-shrink: 0; white-space: nowrap; }
+.bottom-right { bottom: 12px; right: 12px; }
+.bottom-right > button { white-space: nowrap; }
+/* Centred in the bottom row (as tall as the buttons beside it), clear of
+   「清空缓存」 on the left and the mode button on the right. */
+.attribution-row {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px;
+  width: max-content; max-width: calc(100vw - 290px); min-height: 34px;
+  display: flex; align-items: center; justify-content: center;
+}
 
 .panel {
   background: var(--panel-bg);
@@ -70,7 +75,7 @@ button.link { background: none; border: none; box-shadow: none; padding: 0; colo
 .net-status[data-state="offline"] { color: var(--danger); font-weight: 600; }
 .net-status[data-state="degraded"] { color: #9a6700; font-weight: 600; }
 
-.attribution { font-size: 11px; color: var(--muted); padding: 2px 8px; text-align: right; box-sizing: border-box; flex: 0 1 auto; min-width: 0; align-self: center; }
+.attribution { font-size: 11px; color: var(--muted); padding: 2px 8px; text-align: center; box-sizing: border-box; min-width: 0; }
 .attribution a { color: var(--muted); }
 
 .legend { position: absolute; top: 52px; right: 12px; max-height: calc(100% - 160px); overflow: auto; padding: 8px 12px; font-size: 12px; pointer-events: auto; }
