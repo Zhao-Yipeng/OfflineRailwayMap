@@ -121,6 +121,30 @@ def test_plan_uses_the_smallest_regions_and_parents_when_worth_it():
     assert len(every) == 5 and all(regions == ["china"] for regions in every.values()), every
 
 
+def test_plan_uses_what_is_on_disk_or_being_downloaded():
+    """Regions on hand (downloaded for other cells or the construction overlay, or being
+    downloaded) cost no download: whoever came first, nothing is downloaded twice."""
+    index = RegionIndex.from_json(index_json("https://x"))
+    size_of = lambda region: {"china": 300e6}.get(region.id, 50e6)  # noqa: E731
+    cells = [(210, 96), (211, 97), (200, 100), (185, 100), (218, 100)]  # all six provinces
+    provinces = {"west1", "west2", "beijing", "tianjin", "east1", "east2"}
+
+    def used(result):
+        return {r for regions in result.values() for r in regions}
+
+    assert used(plan(index, cells, size_of)) == {"china"}, "nothing on hand: the country (as before)"
+    assert used(plan(index, cells, size_of, lambda r: r.id in provinces)) == provinces, "all there: no country"
+    # three there: the country (300 MB) is more than 1.25 times the other three (150 MB)
+    assert used(plan(index, cells, size_of, lambda r: r.id in {"beijing", "tianjin", "east1"})) == provinces
+    # the country there (cells of many provinces): used even for one cell, but not instead of its province
+    assert plan(index, [(210, 96)], size_of, lambda r: r.id == "china") == {"210-96": ["china"]}
+    assert plan(index, [(210, 96)], size_of, lambda r: r.id in {"china", "beijing"}) == {"210-96": ["beijing"]}
+    # on hand, a region is never too big for the cells it serves
+    sizes = {"beijing": 40e6, "tianjin": 20e6, "east1": 2000e6, "china": 3000e6}
+    result = plan(index, [(210, 96), (211, 97)], lambda r: sizes.get(r.id), lambda r: r.id == "east1")
+    assert sorted(result["211-97"]) == ["east1", "tianjin"] and result["210-96"] == ["beijing"]
+
+
 def test_plan_without_sizes_takes_the_parent_for_half_the_children():
     index = RegionIndex.from_json(index_json("https://x"))
     cells = [(210, 96), (211, 97), (200, 100)]  # beijing, tianjin + east1, west2: 4 of 6
@@ -357,6 +381,31 @@ def test_plan_from_the_index(home, geofabrik):
     store = make_store(home, geofabrik)
     assert store.plan([(210, 96)]) == {"210-96": ["beijing"]}
     assert geofabrik.count("/index-v1.json") == 1
+
+
+def test_the_plan_prefers_extracts_on_disk(home, geofabrik):
+    store = make_store(home, geofabrik)
+    store.cell_elements(210, 96, ["china"], threading.Event(), no_activity, lambda n: None)
+    assert store.on_hand("china") and store.any_on_hand()
+    assert store.plan([(210, 97)]) == {"210-97": ["china"]}, "all of China on disk: no Tianjin download"
+
+
+def test_a_running_download_is_shared_but_never_started_by_share(home, geofabrik):
+    store = make_store(home, geofabrik)
+    assert not store.share("beijing", threading.Event(), no_activity), "not there, nobody getting it"
+    assert downloads(geofabrik, "beijing") == 0
+    slow = geofabrik.routes["/beijing.osm.pbf"]
+    geofabrik.routes["/beijing.osm.pbf"] = lambda r: (time.sleep(0.5), slow(r))[1]
+    cells = threading.Thread(target=store.cell_elements, args=(210, 96, ["beijing"], threading.Event(),
+                                                              no_activity, lambda n: None))
+    cells.start()
+    end = time.time() + 10
+    while not store.busy("beijing") and time.time() < end:
+        time.sleep(0.01)
+    assert store.on_hand("beijing") and store.any_on_hand()
+    assert store.share("beijing", threading.Event(), no_activity), "waits for the cells' download"
+    cells.join(10)
+    assert downloads(geofabrik, "beijing") == 1
 
 
 def test_old_regions_are_removed(home, geofabrik):

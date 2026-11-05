@@ -260,3 +260,52 @@ def test_extract_failure_falls_back_to_overpass(home, hooks, overpass, geofabrik
         assert overpass.count("/api/interpreter") == 6 * 4, "every cell came from Overpass in the end"
     finally:
         core.shutdown()
+
+
+def test_a_few_cells_share_an_extract_being_downloaded(home, hooks, overpass, geofabrik):
+    """Fewer than six cells use an extract that is being downloaded (here: for the
+    construction overlay) instead of asking Overpass: nothing is downloaded twice."""
+    import threading
+
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    serve = geofabrik.routes["/tianjin.osm.pbf"]
+    geofabrik.routes["/tianjin.osm.pbf"] = lambda r: (time.sleep(1.0 if r.method == "GET" else 0), serve(r))[1]
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        overlay = threading.Thread(target=core.extracts.ensure, args=("tianjin", threading.Event(), lambda *a: None))
+        overlay.start()
+        assert wait_for(lambda: core.extracts.busy("tianjin"))
+        core.cells.apply(["210-97"], [], (116, 39))  # in "tianjin"
+        assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached", timeout=60)
+        overlay.join(10)
+        assert overpass.count("/api/interpreter") == 0, "no Overpass queries"
+        downloads = [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+        assert downloads == ["/tianjin.osm.pbf"]
+    finally:
+        core.shutdown()
+
+
+def test_cells_and_the_construction_overlay_share_all_of_china(home, hooks, overpass, geofabrik):
+    """Many cells chose all of China's extract while 「永远显示在建线路」 waited for them
+    (SPEC §7.9): the overlay reads every province from it instead of downloading them."""
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        core.cells.apply(SIX, [], (116, 39))
+        assert wait_for(lambda: core.downloader.busy)
+        core.settings.always_show_construction = True
+        core.construction.settings_changed()
+        assert wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=60)
+        assert wait_for(lambda: not core.construction._thread.is_alive(), timeout=30)
+        downloads = [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+        assert downloads == ["/china.osm.pbf"], downloads
+        assert core.construction._built_at("china") > 0, "the overlay read it"
+        assert core.construction.question() is None, "nothing was downloaded for the overlay alone"
+        # switching on again later downloads nothing either
+        core.construction.settings_changed()
+        assert wait_for(lambda: not core.construction._thread.is_alive(), timeout=30)
+        assert len([r for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]) == 1
+    finally:
+        core.shutdown()

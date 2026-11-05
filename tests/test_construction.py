@@ -2,7 +2,8 @@
 
 A stand-in Geofabrik serves the same small extract for each of the six
 "provinces" of test_extracts.index_json ("china" > west1, west2, beijing,
-tianjin, east1, east2; "mongolia" is outside China).
+tianjin, east1, east2; "mongolia" is outside China) and for all of China,
+which cell downloads of many cells may choose.
 """
 
 from __future__ import annotations
@@ -31,7 +32,9 @@ PROVINCES = ("west1", "west2", "beijing", "tianjin", "east1", "east2")
 ON_LINE = (116.4, 39.9)  # a point on the high-speed line under construction
 
 
-def write_pbf(path: Path) -> None:
+def write_pbf(path: Path, opened: bool = False, deleted: bool = True) -> None:
+    """``opened``: the high-speed line (100) is in service now; ``deleted``: without the
+    line 106 (in "beijing", far from its borders)."""
     with osmium.SimpleWriter(str(path)) as w:
         for i, (lon, lat) in enumerate([(116.1, 39.6), (116.4, 39.9), (116.7, 40.2)], 1):
             w.add_node(Node(id=i, location=(lon, lat)))
@@ -43,9 +46,17 @@ def write_pbf(path: Path) -> None:
         w.add_node(Node(id=32, location=(116.41, 39.905)))
         w.add_node(Node(id=41, location=(133.0, 45.0)))
         w.add_node(Node(id=42, location=(137.0, 45.0)))
+        w.add_node(Node(id=51, location=(116.2, 40.3)))
+        w.add_node(Node(id=52, location=(116.6, 40.6)))
         # a high-speed line under construction: drawn at every zoom
-        w.add_way(Way(id=100, nodes=[1, 2, 3], tags={"railway": "construction", "construction": "rail",
-                                                     "usage": "main", "maxspeed": "350", "name": "在建高铁"}))
+        if opened:
+            w.add_way(Way(id=100, nodes=[1, 2, 3], tags={"railway": "rail", "usage": "main", "maxspeed": "350"}))
+        else:
+            w.add_way(Way(id=100, nodes=[1, 2, 3], tags={"railway": "construction", "construction": "rail",
+                                                         "usage": "main", "maxspeed": "350", "name": "在建高铁"}))
+        if not deleted:
+            w.add_way(Way(id=106, nodes=[51, 52], tags={"railway": "construction", "construction": "rail",
+                                                        "usage": "main", "maxspeed": "250"}))
         # from z10 / z13 the ORM tiles draw these: not part of the overlay
         w.add_way(Way(id=101, nodes=[11, 12], tags={"railway": "construction", "construction": "subway"}))
         w.add_way(Way(id=103, nodes=[31, 32], tags={"railway": "construction", "construction:railway": "rail",
@@ -61,24 +72,37 @@ class Geofabrik:
     """Index, extracts and checksums; ``slow`` regions take ``delay`` seconds to answer."""
 
     def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
         pbf = tmp_path / "served.osm.pbf"
         write_pbf(pbf)
         self.data = pbf.read_bytes()
+        self.data_for: dict[str, bytes] = {}
         self.slow: dict[str, float] = {}
         self.server = FakeServer().start()
         self.server.routes["/index-v1.json"] = lambda r: (
             200, {"Content-Type": "application/json"}, json.dumps(index_json(self.server.url)).encode())
-        md5 = hashlib.md5(self.data).hexdigest()
         for name in (*PROVINCES, "china", "mongolia", "asia"):
             self.server.routes[f"/{name}.osm.pbf"] = self._route(name)
-            self.server.routes[f"/{name}.osm.pbf.md5"] = lambda r: (200, {}, f"{md5}  x.osm.pbf\n".encode())
+            self.server.routes[f"/{name}.osm.pbf.md5"] = self._md5_route(name)
+
+    def serve(self, name: str, **changes) -> None:
+        """Another extract for this region (see write_pbf)."""
+        pbf = self.tmp_path / f"{name}-changed.osm.pbf"
+        write_pbf(pbf, **changes)
+        self.data_for[name] = pbf.read_bytes()
+
+    def _data(self, name: str) -> bytes:
+        return self.data_for.get(name, self.data)
 
     def _route(self, name: str):
         def route(rec):
             if rec.method == "GET":
                 time.sleep(self.slow.get(name, 0.0))
-            return 200, {}, self.data
+            return 200, {}, self._data(name)
         return route
+
+    def _md5_route(self, name: str):
+        return lambda rec: (200, {}, f"{hashlib.md5(self._data(name)).hexdigest()}  x.osm.pbf\n".encode())
 
     def downloads(self, name: str) -> int:
         return sum(1 for r in self.server.requests if r.method == "GET" and r.path == f"/{name}.osm.pbf")
@@ -347,3 +371,115 @@ def test_a_province_filtered_for_cells_updates_its_lines(home, geofabrik):
     while lines._built_at("tianjin") <= before and time.time() < end:
         time.sleep(0.05)
     assert lines._built_at("tianjin") > before
+
+
+# -- all of China's extract, chosen by cell downloads of many cells --------------------------------
+
+
+def for_cells(lines: ConstructionLines, regions: list[str], cell=(210, 96)) -> list[dict]:
+    """What a cell download does with the regions its plan chose."""
+    return lines.extracts.cell_elements(*cell, regions, threading.Event(), lambda *a, **k: None, lambda n: None)
+
+
+def wait_until(predicate, timeout: float = 10.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def line_sources(lines: ConstructionLines) -> set[str]:
+    return {row[0] for row in lines._db(create=False).execute("SELECT DISTINCT region FROM lines")}
+
+
+def test_all_of_china_downloaded_for_cells_serves_every_province(home, geofabrik):
+    """Cells (many of them: all of China's extract) are downloaded while the overlay waits."""
+    busy = Switch(True)
+    lines = make(home, geofabrik, cells_busy=busy)
+    lines.settings_changed()
+    time.sleep(0.5)
+    for_cells(lines, ["china"])
+    busy.on = False
+    assert wait_for_question(lines) is None, "nothing was downloaded for the overlay alone"
+    assert geofabrik.downloaded() == {"china"}, "no province downloaded on top"
+    for z in range(2, 15):
+        assert 100 in ids(lines.tile(*tile_at(z))), f"z{z}"
+    assert 104 in ids(lines.tile(*tile_at(9, lon=134.0, lat=45.0))), "inside China"
+    assert ids(lines.tile(*tile_at(9, lon=136.0, lat=45.0))) == set(), "across the border: cut off"
+
+
+def test_cells_choosing_all_of_china_end_the_province_downloads(home, geofabrik):
+    """The overlay had begun with the provinces when cells chose all of China's extract:
+    it uses that one for the rest, and asks only about what it downloaded itself."""
+    released = threading.Event()
+    lines = make(home, geofabrik, center=(116.4, 40.5),  # in "beijing": that one first
+                 cells_busy=lambda: geofabrik.downloads("beijing") > 0 and not released.is_set())
+    lines.settings_changed()
+    assert wait_until(lambda: lines._built_at("beijing") > 0)
+    time.sleep(0.3)  # the overlay waits for the cells now
+    assert geofabrik.downloaded() == {"beijing"}
+    for_cells(lines, ["china"])
+    released.set()
+    question = wait_for_question(lines)
+    assert geofabrik.downloaded() == {"beijing", "china"}, "no further province"
+    assert question["regions"] == ["beijing"], "all of China belongs to the cells"
+    assert line_sources(lines) == {"china"}, "the newer extract replaced Beijing's lines"
+    for z in range(2, 15):
+        assert 100 in ids(lines.tile(*tile_at(z))), f"z{z}"
+    lines.decide(delete=True)
+    assert not lines.extracts.db_path("beijing").exists() and lines.extracts.db_path("china").exists()
+
+
+def test_a_download_of_all_of_china_in_progress_is_waited_for(home, geofabrik):
+    """Switched on while cells download all of China: no province is downloaded, and the
+    overlay does not wait for the other cells."""
+    geofabrik.slow["china"] = 1.5
+    lines = make(home, geofabrik, cells_busy=lambda: True)  # cells keep downloading
+    cells = threading.Thread(target=for_cells, args=(lines, ["china"]))
+    cells.start()
+    assert wait_until(lambda: lines.extracts.busy("china"))
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    cells.join(10)
+    assert question is None
+    assert geofabrik.downloaded() == {"china"} and geofabrik.downloads("china") == 1
+    assert 100 in ids(lines.tile(*tile_at(6)))
+
+
+def test_all_of_china_filtered_for_cells_later_replaces_the_provinces_lines(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    wait_for_question(lines)
+    lines.decide(delete=True)
+    for_cells(lines, ["china"])  # later, cells of many provinces
+    assert wait_until(lambda: lines._built_at("china") > 0)  # read in the background
+    assert line_sources(lines) == {"china"}
+    assert 100 in ids(lines.tile(*tile_at(6))) and 100 in ids(lines.tile(*tile_at(12)))
+    lines.settings_changed()  # switching on again: nothing missing, nothing downloaded
+    wait_for_question(lines)
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES) and geofabrik.downloads("china") == 1
+
+
+def test_the_extract_read_last_decides_about_its_lines(home, geofabrik):
+    """All of China's extract first, Beijing's newer one later (both for cells): a line
+    opened since and one deleted since are no longer drawn as under construction."""
+    geofabrik.serve("china", deleted=False)  # 106 still there
+    geofabrik.serve("beijing", opened=True)  # since then: 100 in service, 106 deleted
+    lines = make(home, geofabrik)
+    for_cells(lines, ["china"])
+    lines.settings_changed()
+    assert wait_for_question(lines) is None and geofabrik.downloaded() == {"china"}
+    in_beijing = tile_at(10, lon=116.4, lat=40.45)
+    assert 100 in ids(lines.tile(*tile_at(6))) and 106 in ids(lines.tile(*in_beijing))
+    for_cells(lines, ["beijing"])
+    assert wait_until(lambda: lines._built_at("beijing") > 0)
+    assert 100 not in ids(lines.tile(*tile_at(6))) and 100 not in ids(lines.tile(*tile_at(12)))
+    assert 106 not in ids(lines.tile(*in_beijing)) and 106 not in ids(lines.tile(*tile_at(6)))
+    assert 104 in ids(lines.tile(*tile_at(9, lon=134.0, lat=45.0))), "elsewhere all of China's lines stay"
+    # and so after a restart
+    lines.stop()
+    lines.close()
+    again = make(home, geofabrik)
+    assert 100 not in ids(again.tile(*tile_at(6))) and 104 in ids(again.tile(*tile_at(9, lon=134.0, lat=45.0)))

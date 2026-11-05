@@ -9,7 +9,8 @@ time, which bounds memory and CPU use.
 
 The railway data comes from regional extracts (extracts.py) when many cells
 are waiting (``EXTRACT_MIN_CELLS``) or the cell's regions are already on
-disk, otherwise from Overpass; if an extract cannot be used, from Overpass.
+disk or being downloaded, otherwise from Overpass; if an extract cannot be
+used, from Overpass.
 
 Work happens in ``data/tmp/<cell>``; the cell only becomes "cached" once
 everything is in place, so the page never shows half a cell.
@@ -271,13 +272,14 @@ class Downloader:
                     log.info("%d of %d waiting cells get their railway data from regional extracts",
                              len(self._plan), len(pending))
             regions = self._plan.get(cid)
-            if regions is None and self.extracts.any_fresh():
-                # Regions downloaded recently are used even for a few cells.
+            if regions is None and self.extracts.any_on_hand():
+                # Regions on disk (filtered within 7 days) or being downloaded - for other
+                # cells or the construction overlay - are used even for a few cells.
                 try:
                     regions = self.extracts.plan([(x, y)]).get(cid)
                 except Exception:  # noqa: BLE001 - Overpass then
                     regions = None
-                if regions and not all(self.extracts.fresh(r) for r in regions):
+                if regions and not all(self.extracts.on_hand(r) for r in regions):
                     regions = None
         if regions and all(self.extracts.usable(r) for r in regions):
             return regions

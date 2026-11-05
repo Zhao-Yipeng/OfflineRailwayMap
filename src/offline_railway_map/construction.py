@@ -2,24 +2,31 @@
 
 The ORM speed tiles draw lines under construction only from z9, and no
 public service has pictures of them below that.  With this setting on, the
-program reads them from Geofabrik's extracts of China's provinces
-(extracts.py) and draws them the way cached cells do: at every zoom,
-coloured by speed, with the same widths (SPEC §7.3–7.5).  Only China:
-elsewhere nothing is drawn or downloaded.
+program reads them from Geofabrik's extracts of China (extracts.py) and
+draws them the way cached cells do: at every zoom, coloured by speed, with
+the same widths (SPEC §7.3–7.5).  Only China: elsewhere nothing is drawn or
+downloaded.
 
 * Switching the setting on goes through the provinces, the one in view
-  first.  A province already on disk (downloaded for cells) is used as it is;
-  the others are downloaded and filtered through the same per-region jobs as
-  cell downloads, so nothing is downloaded twice.  Its railway lines under
-  construction (type rail, without service: the ones shown below z9; the
-  ORM tiles draw the others from z10) go to data/cache/construction.sqlite.
+  first.  Extracts on disk or being downloaded for cells are shared, never
+  downloaded twice: all of China's (cell downloads of many cells may choose
+  it) serves every province at once, a province's own serves that province.
+  The other provinces are downloaded and filtered through the same
+  per-region jobs as cell downloads, once cell downloads are done.  The
+  railway lines under construction (type rail, without service: the ones
+  shown below z9; the ORM tiles draw the others from z10) go to
+  data/cache/construction.sqlite.
+* The extract read last decides about the ways it has, whatever they are
+  now, and about everything inside its borders: older copies there (all of
+  China's, a neighbouring province's margin) are dropped, so lines opened or
+  deleted since disappear.
 * Afterwards the page asks whether the extracts downloaded for this, and for
   nothing else, are deleted now or kept for 7 days like other extracts.
   Extracts that cells used, or that waiting cells may read, are not among
   them.  Unanswered, the question comes back at the next start.
 * A province's lines count as current for ``FRESH_FOR`` (7 days); switching
-  the setting on again refreshes older ones, and whenever a province is
-  filtered for cells its lines are updated as well.
+  the setting on again refreshes older ones, and whenever China or a
+  province is filtered for cells, its lines are updated as well.
 * Vector tiles are made on request; inside cached cells (z >= 8) they are
   empty: a cached cell draws its own lines.
 """
@@ -66,13 +73,16 @@ CHINA = "china"  # Geofabrik's region; its parts are the province-level extracts
 FRESH_FOR = 7 * 24 * 3600.0
 PUBLISH_EVERY = 2.0  # seconds between "new lines" events to the page
 MAX_TILES = 512
+INSIDE_MARGIN = 0.01  # degrees (about 1 km): "inside an extract's borders" keeps this far from them
 # Version 2: lines cut to China (geometry as WKB).  Older files - the Overpass
 # version of this overlay, or lines not yet cut - are emptied and filled again.
+# "provinces" holds the extracts read: provinces, or all of China ("china").
 SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS provinces (region TEXT PRIMARY KEY, built_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS lines (region TEXT NOT NULL, id INTEGER NOT NULL, tags TEXT NOT NULL, geom BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS lines_region ON lines(region);
+CREATE INDEX IF NOT EXISTS lines_way ON lines(region, id);
 CREATE TABLE IF NOT EXISTS owned (region TEXT PRIMARY KEY);
 """
 
@@ -103,6 +113,15 @@ def construction_rows(db: Path, china) -> list[tuple[int, dict, object]]:
             line = parts[0] if len(parts) == 1 else shapely.MultiLineString(parts)
         out.append((way_id, json.loads(tags), line))
     return out
+
+
+def known_ways(db: Path) -> np.ndarray:
+    """Every railway way in a filtered extract, whatever it is now (built, under construction ...)."""
+    conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    try:
+        return np.fromiter((row[0] for row in conn.execute("SELECT id FROM ways")), dtype=np.int64)
+    finally:
+        conn.close()
 
 
 def _make_lines(rows) -> list[_Line]:
@@ -145,6 +164,25 @@ def _make_area(region: str, built_at: float, lines: list[_Line]) -> _Area:
     return _Area(region, built_at, lines, tree, lod, bounds)
 
 
+def _prune(area: _Area, known: np.ndarray, inside) -> tuple[_Area, list[int]] | None:
+    """``area`` without the lines a newer extract decides about: the ways it has (``known``)
+    and the lines inside its borders (``inside``, Web Mercator).  Also the way ids taken
+    out; None if there are none."""
+    if not area.lines:
+        return None
+    ids = np.fromiter((line.way_id for line in area.lines), dtype=np.int64, count=len(area.lines))
+    gone = np.isin(ids, known) | shapely.contains(inside, [line.geom for line in area.lines])
+    if not gone.any():
+        return None
+    keep = ~gone
+    lines = [line for line, k in zip(area.lines, keep) if k]
+    lod = {level: [geom for geom, k in zip(geoms, keep) if k] for level, geoms in area.lod.items()}
+    geoms = [line.geom for line in lines]
+    tree = shapely.STRtree(geoms) if geoms else None
+    bounds = tuple(shapely.total_bounds(geoms)) if geoms else None
+    return _Area(area.region, area.built_at, lines, tree, lod, bounds), [int(w) for w in ids[gone]]
+
+
 @dataclass
 class _Run:
     """One pass over China's provinces."""
@@ -152,6 +190,7 @@ class _Run:
     generation: int
     cancel: threading.Event = field(default_factory=threading.Event)
     quiet: bool = False  # closing or clearing: no question at the end
+    no_china: bool = False  # all of China's extract could not be read: the provinces' own then
 
 
 class ConstructionLines:
@@ -182,6 +221,8 @@ class ConstructionLines:
         self.cells_busy = cells_busy
         self.version = 0
         self._lock = threading.RLock()
+        self._load_lock = threading.Lock()  # one extract read at a time (the pass, after filtering)
+        self._epoch = 0  # counts 「清空缓存」: a read begun before must not save anything
         self._conn: sqlite3.Connection | None = None
         self._areas: dict[str, _Area] | None = None  # loaded on first use
         self._tiles: OrderedDict[tuple[int, int, int], bytes] = OrderedDict()
@@ -249,41 +290,21 @@ class ConstructionLines:
             if china is None:
                 self._problem("在建线路：地区数据包目录里没有中国")
                 return
-            lon, lat = self.view_center()
-            provinces = sorted(china.children, key=lambda r: r.geometry.centroid.distance(shapely.Point(lon, lat)))
+            point = shapely.Point(*self.view_center())
+            provinces = sorted(
+                china.children, key=lambda r: (r.geometry.distance(point), r.geometry.centroid.distance(point))
+            )
             todo = [p for p in provinces if self._needs(p.id, refresh)]
             for n, region in enumerate(todo, 1):
                 if self._stopped(run):
                     break
-                label = f"在建线路（{n}/{len(todo)}）"
-                self._note(f"{label}：{region.name}")
-                if not self.extracts.usable(region.id):
-                    failed += 1
-                    continue
-                if not self.extracts.fresh(region.id) and not self.extracts.busy(region.id):
-                    # Cell downloads come first: the next province is downloaded once they are done.
-                    while self.cells_busy() and not self._stopped(run):
-                        self._note(f"{label}：等方格下载完成后继续")
-                        run.cancel.wait(1.0)
-                    if self._stopped(run):
-                        break
-                    self._note(f"{label}：{region.name}")
-                try:
-                    downloaded = self.extracts.ensure(
-                        region.id, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}")
-                    )
-                except extracts_module.Cancelled:
+                if self._covered_at(region.id) >= started:
+                    continue  # read meanwhile: from all of China's extract, or after cells filtered it
+                done = self._province(run, region, f"在建线路（{n}/{len(todo)}）", refresh, started)
+                if done is None:
                     break
-                except ExtractUnavailable as exc:
-                    log.warning("construction lines: %s", exc)
+                if not done:
                     failed += 1
-                    continue
-                if downloaded:
-                    self._own(region.id)  # even if stopped now: it was downloaded for this
-                if self._stopped(run):
-                    break
-                if self._built_at(region.id) < started:  # not just updated by _filtered
-                    self._load_region(region.id)
             if not self._stopped(run):
                 if failed:
                     self._problem(f"在建线路：{failed} 个地区的数据包暂时下载失败，下次打开程序时重试")
@@ -299,12 +320,73 @@ class ConstructionLines:
                 if question:
                     self.on_question(question)
 
+    def _province(self, run: _Run, region, label: str, refresh: bool, started: float) -> bool | None:
+        """Get one province's lines: True when done, False if its extract failed for now,
+        None when stopped.
+
+        All of China's extract, if cells downloaded it or are downloading it, serves every
+        province at once.  Otherwise the province's own: used if it is on disk, shared if
+        cells are downloading it, else downloaded once cell downloads are done.
+        """
+        try:
+            self._note(f"{label}：{region.name}")
+            while True:
+                if self._from_china(run, refresh, started):
+                    return True
+                if self._stopped(run):
+                    return None
+                if not self.extracts.usable(region.id):
+                    return False
+                if self.extracts.on_hand(region.id) or not self.cells_busy():
+                    break
+                # Cell downloads come first; they may also bring all of China (checked again above).
+                self._note(f"{label}：等方格下载完成后继续")
+                run.cancel.wait(1.0)
+            self._note(f"{label}：{region.name}")
+            downloaded = self.extracts.ensure(
+                region.id, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}")
+            )
+        except extracts_module.Cancelled:
+            return None
+        except ExtractUnavailable as exc:
+            log.warning("construction lines: %s", exc)
+            return False
+        if downloaded:
+            self._own(region.id)  # even if stopped now: it was downloaded for this
+        if self._stopped(run):
+            return None
+        self._load_region(region.id, since=started if refresh else 0.0)
+        return True
+
+    def _from_china(self, run: _Run, refresh: bool, started: float) -> bool:
+        """Read every province from all of China's extract if it is on disk or being
+        downloaded for cells (waiting for that download; this never downloads it itself).
+        True when its lines are in place."""
+        if run.no_china or not self.extracts.on_hand(CHINA) or not self.extracts.usable(CHINA):
+            return False
+        label = "在建线路（全国）"
+        self._note(f"{label}：使用方格下载的全国数据包")
+        if not self.extracts.share(CHINA, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}")):
+            run.no_china = True
+            return False
+        if self._stopped(run):
+            return False
+        self._note(f"{label}：提取在建线路")
+        if self._load_region(CHINA, since=started if refresh else 0.0):
+            return True
+        run.no_china = True
+        return False
+
     def _stopped(self, run: _Run) -> bool:
         return run.cancel.is_set() or run.generation != self._generation or self.home.blocked
 
     def _needs(self, region: str, refresh: bool) -> bool:
-        built_at = self._built_at(region)
-        return built_at == 0.0 or (refresh and time.time() - built_at > FRESH_FOR)
+        covered = self._covered_at(region)
+        return covered == 0.0 or (refresh and time.time() - covered > FRESH_FOR)
+
+    def _covered_at(self, region: str) -> float:
+        """When the province's lines were read last: from its own extract or all of China's."""
+        return max(self._built_at(region), self._built_at(CHINA))
 
     def _built_at(self, region: str) -> float:
         with self._lock:
@@ -314,37 +396,85 @@ class ConstructionLines:
             row = conn.execute("SELECT built_at FROM provinces WHERE region=?", (region,)).fetchone()
             return row[0] if row else 0.0
 
-    def _load_region(self, region: str) -> None:
-        """Take the province's lines under construction from its filtered extract."""
+    def _has_lines(self) -> bool:
+        """True once some extract was read (the setting was on)."""
+        with self._lock:
+            conn = self._db(create=False)
+            return conn is not None and conn.execute("SELECT 1 FROM provinces LIMIT 1").fetchone() is not None
+
+    def _load_region(self, region: str, since: float = 0.0) -> bool:
+        """Read the lines under construction from a filtered extract: all of China's or a
+        province's.  True if that file's lines are in place.
+
+        The extract read last decides about the ways it has, whatever they are now, and
+        about everything inside its borders, where a way it does not have no longer
+        exists: older copies there (all of China's, a neighbouring province's margin)
+        are dropped.  Lines read from this file already are kept, unless read before
+        ``since`` (switching on again refreshes them).
+        """
         db = self.extracts.db_path(region)
         index = self.extracts._index
-        if self.home.blocked or not db.exists() or index is None or CHINA not in index.regions:
-            return
-        rows = construction_rows(db, index.regions[CHINA].geometry)
-        lines = _make_lines(rows)
-        kept = {line.way_id for line in lines}
-        now = time.time()
-        with self._lock:
+        if self.home.blocked or index is None or CHINA not in index.regions or region not in index.regions:
+            return False
+        with self._load_lock:
             try:
-                conn = self._db(create=True)
-            except (DataBlocked, OSError, sqlite3.Error) as exc:
-                log.warning("construction lines not saved: %s", exc)
-                return
-            conn.execute("BEGIN")
-            conn.execute("DELETE FROM lines WHERE region=?", (region,))
-            conn.executemany(
-                "INSERT INTO lines VALUES (?, ?, ?, ?)",
-                [(region, way_id, json.dumps(tags, ensure_ascii=False, separators=(",", ":")),
-                  shapely.to_wkb(geom)) for way_id, tags, geom in rows if way_id in kept],
-            )
-            conn.execute("INSERT OR REPLACE INTO provinces VALUES (?, ?)", (region, now))
-            conn.execute("COMMIT")
-            self._loaded()[region] = _make_area(region, now, lines)
-            self.version += 1
-            self._tiles.clear()
-            self._unpublished = True
-        log.info("construction lines: %s, %d lines", region, len(lines))
+                written = db.stat().st_mtime
+            except OSError:
+                return False
+            if self._built_at(region) >= max(written, since):
+                return True  # read already (by the pass, or right after cells filtered it)
+            epoch = self._epoch
+            try:
+                rows = construction_rows(db, index.regions[CHINA].geometry)
+                known = known_ways(db)
+            except (OSError, sqlite3.Error) as exc:
+                log.warning("construction lines from %s: %s", region, exc)
+                return False
+            lines = _make_lines(rows)
+            kept = {line.way_id for line in lines}
+            now = time.time()
+            area = _make_area(region, now, lines)
+            # Away from the borders: what lies right at them may be cut off by the extract.
+            inside = shapely.transform(index.regions[region].geometry.buffer(-INSIDE_MARGIN), to_mercator)
+            shapely.prepare(inside)
+            with self._lock:
+                older = [(other, old) for other, old in self._loaded().items() if other != region]
+            pruned = [(other, result) for other, old in older if (result := _prune(old, known, inside)) is not None]
+            with self._lock:
+                if self._epoch != epoch:
+                    return False  # the cache was cleared meanwhile
+                try:
+                    conn = self._db(create=True)
+                    conn.execute("BEGIN")
+                    conn.execute("DELETE FROM lines WHERE region=?", (region,))
+                    conn.executemany(
+                        "INSERT INTO lines VALUES (?, ?, ?, ?)",
+                        [(region, way_id, json.dumps(tags, ensure_ascii=False, separators=(",", ":")),
+                          shapely.to_wkb(geom)) for way_id, tags, geom in rows if way_id in kept],
+                    )
+                    for other, (_smaller, gone) in pruned:
+                        conn.executemany("DELETE FROM lines WHERE region=? AND id=?", [(other, w) for w in gone])
+                    conn.execute("INSERT OR REPLACE INTO provinces VALUES (?, ?)", (region, now))
+                    conn.execute("COMMIT")
+                except (DataBlocked, OSError, sqlite3.Error) as exc:
+                    log.warning("construction lines not saved: %s", exc)
+                    try:
+                        if self._conn is not None and self._conn.in_transaction:
+                            self._conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    return False
+                areas = self._loaded()
+                areas[region] = area
+                for other, (smaller, _gone) in pruned:
+                    areas[other] = smaller
+                self.version += 1
+                self._tiles.clear()
+                self._unpublished = True
+        log.info("construction lines: %s, %d lines (%d older copies dropped)", region, len(lines),
+                 sum(len(gone) for _other, (_smaller, gone) in pruned))
         self._maybe_publish()
+        return True
 
     # -- what was downloaded for this, and the question --------------------------------------
 
@@ -408,14 +538,17 @@ class ConstructionLines:
         log.info("construction lines: %s %d extracts (%d bytes)", "deleted" if delete else "kept", len(doomed), freed)
         return {"deleted": len(doomed), "kept": len(owned) - len(doomed), "bytes": freed}
 
-    # -- cell downloads filtered a province ------------------------------------------------------
+    # -- an extract was filtered (also for cells) -------------------------------------------------
 
     def _filtered(self, region: str) -> None:
-        """A province was filtered (also for cells): update its lines if this is in use."""
+        """All of China or a province was filtered (also for cells): read its lines if the
+        setting is on, or was (its lines are kept)."""
         index = self.extracts._index
-        if index is None or region not in index.regions or index.regions[region].parent != CHINA:
+        if index is None or region not in index.regions:
             return
-        if self.enabled() or self._built_at(region) > 0:
+        if region != CHINA and index.regions[region].parent != CHINA:
+            return
+        if self.enabled() or self._has_lines():
             self._load_region(region)
 
     # -- drawing -------------------------------------------------------------------------------
@@ -465,7 +598,7 @@ class ConstructionLines:
         pad = (maxx - minx) * BUFFER
         west, south, east, north = minx - pad, miny - pad, maxx + pad, maxy + pad
         query = box(west, south, east, north)
-        found: dict[int, tuple[float, _Line, object]] = {}  # way id -> newest copy (border ways are in both provinces)
+        found: dict[int, tuple[float, _Line, object]] = {}  # way id -> newest copy (normally the only one)
         level = next((lv for lv in LOD_LEVELS if z <= lv), None) if z < CELL_ZOOM else None
         for area in areas:
             if area.tree is None or area.bounds is None:
@@ -548,6 +681,7 @@ class ConstructionLines:
     def forget(self) -> None:
         """After 「清空缓存」: nothing is known any more."""
         with self._lock:
+            self._epoch += 1
             self._areas = None
             self._tiles.clear()
             self.version += 1
