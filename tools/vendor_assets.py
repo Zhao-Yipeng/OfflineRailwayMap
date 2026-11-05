@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "src" / "offline_railway_map" / "web" / "vendor"
-USER_AGENT = "OfflineRailwayMap-build-tools/1.0 (+https://github.com/Zhao-Yipeng/task1)"
+USER_AGENT = "OfflineRailwayMap-build-tools/1.0 (+https://github.com/Zhao-Yipeng/OfflineRailwayMap)"
 
 MAPLIBRE_VERSION = "5.24.0"
 

@@ -717,7 +717,7 @@ OfflineRailwayMap\                       程序文件夹（解压得到）
 
 ### 12.1 User-Agent
 
-所有对外请求都使用 `OfflineRailwayMap/<版本号> (+<项目主页>)`，例如 `OfflineRailwayMap/1.0.0 (+https://github.com/zhao-yipeng/task1)`。项目主页取发布时的 GitHub 仓库地址。不得伪装成浏览器或其他程序，不得伪造 Referer。
+所有对外请求都使用 `OfflineRailwayMap/<版本号> (+<项目主页>)`，例如 `OfflineRailwayMap/1.0.0 (+https://github.com/Zhao-Yipeng/OfflineRailwayMap)`。项目主页取发布时的 GitHub 仓库地址。不得伪装成浏览器或其他程序，不得伪造 Referer。
 
 ### 12.2 OpenRailwayMap（瓦片和搜索 API）
 
