@@ -52,9 +52,11 @@ INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 EXTRACT_MIN_CELLS = 6  # from this many cells waiting, extracts are preferred (user's choice)
 REUSE_FOR = 7 * 24 * 3600.0
 PARTIAL_KEPT_FOR = 24 * 3600.0  # an interrupted download is continued within this time
-# A region bigger than this per cell it serves is not worth it: Overpass needs
-# about half a minute per cell, a download of this size about as long.
-MAX_MB_PER_CELL = 100
+# A region bigger than this per cell it serves is not worth it (all of a
+# neighbouring country for one border cell).  Real sizes (2026-11): Chinese
+# provinces checked: Macau 3 MB to Guangdong 175 MB (Hebei 108, Beijing 37);
+# Bavaria 857 MB; Japan's Kanto 524 MB and Chubu 516 MB.
+MAX_MB_PER_CELL = 250
 FAILED_PAUSE = 30 * 60.0  # after a failed download, cells use Overpass for this long
 RETRY_DELAYS = (5, 15, 45, 120)  # seconds before continuing a broken download
 MIN_SHARE = 0.005  # share of a cell a region must cover to be used for it

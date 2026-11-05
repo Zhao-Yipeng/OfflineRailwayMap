@@ -204,10 +204,10 @@ def test_a_country_around_a_small_neighbour_is_still_downloaded():
 def test_too_big_regions_are_left_out_until_nothing_changes():
     """A region left with fewer cells after another one was left out is checked again."""
     index = RegionIndex.from_json(index_json("https://x"))
-    sizes = {"beijing": 30e6, "tianjin": 150e6, "east1": 150e6, "china": 9000e6}
-    # tianjin serves 210-97 and 211-97 (75 MB each); 211-97 also needs east1 (150 MB for one cell)
+    sizes = {"beijing": 30e6, "tianjin": 300e6, "east1": 300e6, "china": 9000e6}
+    # tianjin serves 210-97 and 211-97 (150 MB each); 211-97 also needs east1 (300 MB for one cell)
     result = plan(index, [(210, 97), (211, 97)], lambda region: sizes.get(region.id))
-    assert result == {}, "without 211-97, tianjin is 150 MB for one cell"
+    assert result == {}, "without 211-97, tianjin is 300 MB for one cell"
 
 
 def test_continents_are_never_downloaded():

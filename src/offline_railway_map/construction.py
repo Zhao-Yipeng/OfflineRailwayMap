@@ -182,9 +182,9 @@ class ConstructionLines:
         """The vector tile (empty when the setting is off or inside a cached cell)."""
         if not self.enabled():
             return b""
-        self._want_for_tile(z, x, y)
         if z >= CELL_ZOOM and self.coverage.is_cached(x >> (z - CELL_ZOOM), y >> (z - CELL_ZOOM)):
-            return b""
+            return b""  # the cell draws its own lines; nothing to fetch for it either
+        self._want_for_tile(z, x, y)
         key = (z, x, y)
         with self._lock:
             if key in self._tiles:
