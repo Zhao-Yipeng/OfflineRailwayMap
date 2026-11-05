@@ -1,0 +1,113 @@
+name: build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch replaces a build that is still running.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write  # only used to attach the zip to a release on version tags
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Tests
+        run: python -m pytest
+
+      - name: Regional extracts on the real Geofabrik server (informational)
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          PYTHONUTF8: "1"
+        run: python tools/check_extracts.py
+
+      - name: Qt window smoke test (off-screen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tests/qt_smoke.py
+
+      - name: Build (PyInstaller, one folder)
+        run: pyinstaller packaging/OfflineRailwayMap.spec --noconfirm
+
+      - name: The build starts and writes nothing
+        shell: pwsh
+        run: |
+          # SPEC 11: nothing in the program folder (not even __pycache__) until
+          # there is something to keep, and never anything under %APPDATA%,
+          # %LOCALAPPDATA% or in the registry (HKCU\Software).
+          $program = "dist/OfflineRailwayMap"
+          $listProgram = { Get-ChildItem -Recurse -Force -LiteralPath $program | ForEach-Object FullName }
+          $watched = @($env:APPDATA, $env:LOCALAPPDATA)
+          $list = { $watched | ForEach-Object { Get-ChildItem -Force -LiteralPath $_ | ForEach-Object FullName } }
+          $listRegistry = { Get-ChildItem -Path "HKCU:\Software" | ForEach-Object Name }
+          $listTemp = { Get-ChildItem -Force -LiteralPath $env:TEMP | ForEach-Object FullName }
+          $beforeProgram = & $listProgram
+          $before = & $list
+          $beforeRegistry = & $listRegistry
+          $beforeTemp = & $listTemp
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process -FilePath "$program/OfflineRailwayMap.exe" -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) { throw "the program exited early (code $($p.ExitCode))" }
+          Stop-Process -Id $p.Id -Force
+          Start-Sleep -Seconds 3
+          $newProgram = Compare-Object @($beforeProgram) @(& $listProgram) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($newProgram) { throw "created in the program folder: $($newProgram -join ', ')" }
+          $new = Compare-Object @($before) @(& $list) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($new) { throw "created outside the program folder: $($new -join ', ')" }
+          $newRegistry = Compare-Object @($beforeRegistry) @(& $listRegistry) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($newRegistry) { throw "created in the registry: $($newRegistry -join ', ')" }
+          $newTemp = Compare-Object @($beforeTemp) @(& $listTemp) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
+          if ($newTemp) { Write-Warning "new in %TEMP% while the program ran (may be other processes): $($newTemp -join ', ')" }
+
+      - name: The build can filter regional extracts (osmium self-check)
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "self-check.txt"
+          $p = Start-Process -FilePath "dist/OfflineRailwayMap/OfflineRailwayMap.exe" -ArgumentList "--self-check", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($p.ExitCode -ne 0) { throw "self-check failed (exit code $($p.ExitCode))" }
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'src'); import offline_railway_map as m; print(m.__version__)"
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md -Destination dist/OfflineRailwayMap
+          Copy-Item licenses -Destination dist/OfflineRailwayMap/licenses -Recurse
+          $zip = "OfflineRailwayMap-$version-win64.zip"
+          Compress-Archive -Path dist/OfflineRailwayMap -DestinationPath $zip
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: OfflineRailwayMap-win64
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.zip }}

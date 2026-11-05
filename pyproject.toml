@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "offline-railway-map"
+dynamic = ["version"]
+description = "Windows desktop viewer that caches OpenRailwayMap-style railway speed data for offline use"
+readme = "README.md"
+license = { text = "GPL-3.0-only" }
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.8,<6.9",
+    "requests>=2.32,<3",
+    "shapely>=2.0,<3",
+    "numpy>=1.26,<3",
+    "mapbox-vector-tile>=2.1,<3",
+    "osmium>=4.3,<5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pyinstaller>=6.10",
+]
+
+[project.gui-scripts]
+offline-railway-map = "offline_railway_map.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "offline_railway_map.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+offline_railway_map = ["web/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
+filterwarnings = [
+    # mapbox-vector-tile 2.x still calls shapely.ops.transform internally
+    "ignore:The 'shapely.ops.transform\\(\\)' function is deprecated:DeprecationWarning",
+]

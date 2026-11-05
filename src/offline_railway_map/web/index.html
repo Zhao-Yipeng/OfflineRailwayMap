@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OfflineRailwayMap</title>
+<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="map" aria-label="地图"></div>
+
+<div id="ui">
+  <div class="corner top-left">
+    <form id="search-form" class="panel search" role="search" autocomplete="off">
+      <input id="search-input" type="search" placeholder="搜索车站或地名…" aria-label="搜索车站或地名" enterkeyhint="search">
+    </form>
+    <div id="search-results" class="panel results" hidden></div>
+  </div>
+
+  <div class="corner top-right">
+    <button id="btn-legend" type="button" aria-pressed="false">图例</button>
+    <button id="btn-settings" type="button">设置</button>
+  </div>
+  <div id="legend" class="panel legend" hidden></div>
+
+  <div id="edit-bar" class="panel edit-bar" hidden></div>
+
+  <div class="corner bottom-left">
+    <div class="status-line panel">
+      <div class="status-main">
+        <span id="scale" class="scale"><span class="scale-bar"></span><span class="scale-label"></span></span>
+        <span class="sep">·</span>
+        <span id="net-status" class="net-status" data-state="online">在线</span>
+      </div>
+      <div id="status-notes" class="status-notes" hidden></div>
+    </div>
+    <button id="btn-clear" type="button" class="danger">清空缓存</button>
+  </div>
+
+  <!-- Centred above the attribution (its height is tracked in --bottom-row-height). -->
+  <div id="download-panel" class="panel download-panel" hidden></div>
+
+  <!-- Centred in the bottom row, between 「清空缓存」 and the mode button. -->
+  <div class="attribution-row">
+    <div id="attribution" class="attribution panel"></div>
+  </div>
+
+  <div class="corner bottom-right">
+    <button id="btn-mode" type="button" class="primary">开始浏览</button>
+  </div>
+</div>
+
+<div id="cell-tip" class="panel cell-tip" hidden></div>
+<div id="context-menu" class="panel context-menu" role="menu" hidden></div>
+<div id="modal-root"></div>
+<div id="toast-root" aria-live="polite"></div>
+
+<script src="vendor/maplibre-gl/maplibre-gl.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
