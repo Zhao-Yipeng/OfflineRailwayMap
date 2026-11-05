@@ -66,7 +66,7 @@ def test_cell_is_downloaded_processed_and_installed(home, hooks, overpass):
         assert core.cells.request_update("210-97", with_basemap=False)
         assert core.coverage.is_cached(210, 97)
         assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached" and core.cells.tiles_version > version)
-        assert sum(1 for r in overpass.requests if r.path.startswith("/api/")) == 2
+        assert sum(1 for r in overpass.requests if r.path.startswith("/api/")) == 4 + 4, "four quarters each time"
         assert (home.cell_dir("210-97") / "basemap.sqlite").exists(), "a railway-only update keeps the basemap"
         core.cells.delete(["210-97"])
         assert core.basemap_tiles.tile(4, 210 >> 4, 97 >> 4) is None, "ancestors go with the last cell"
@@ -101,5 +101,58 @@ def test_deleting_a_cell_during_download_cancels_it(home, hooks, overpass):
         assert core.store.cell("210-97") is None
         assert not home.cell_dir("210-97").exists()
         assert not core.coverage.is_cached(210, 97)
+    finally:
+        core.shutdown()
+
+
+def record_cell_events(core) -> list[dict]:
+    seen: list[dict] = []
+    publish = core.events.publish
+
+    def recording(kind, data):
+        if kind == "cell":
+            seen.append(data)
+        publish(kind, data)
+
+    core.events.publish = recording
+    return seen
+
+
+def test_download_activity_is_visible_while_it_happens(home, hooks, overpass):
+    def slow(rec):
+        time.sleep(0.3)
+        return 200, {"Content-Type": "application/json"}, overpass_json()
+
+    overpass.routes["/api/interpreter"] = slow
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    seen = record_cell_events(core)
+    try:
+        core.cells.apply(["210-97"], [], None)
+        assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached")
+        texts = {row["activity"] for row in seen if row["activity"]}
+        assert any("等待 127.0.0.1 返回数据" in text for text in texts), texts
+        assert any("离线底图" in text for text in texts), texts
+        assert max(row["receivedBytes"] for row in seen) > 0, "bytes show up before the cell is finished"
+        assert [row["progress"] for row in seen if row["stage"] == "rail"][-1] > 0, "rail progress is published"
+        final = core.cells.snapshot()["cells"][0]
+        assert final["activity"] is None and final["receivedBytes"] == 0, "nothing left once installed"
+    finally:
+        core.shutdown()
+
+
+def test_busy_servers_leave_a_visible_wait_on_the_cell(home, hooks, overpass):
+    overpass.routes["/api/interpreter"] = lambda r: (504, {}, b"busy")
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.overpass.busy_backoff = (0.01,)
+    core.overpass.busy_response_seconds = 30
+    try:
+        core.cells.apply(["210-97"], [], None)
+
+        def waiting() -> bool:
+            row = core.cells.snapshot()["cells"][0]
+            return row["status"] == "queued" and (row["activityUntil"] or 0) > time.time() + 60
+
+        assert wait_for(waiting, timeout=30), core.cells.snapshot()["cells"][0]
+        assert "忙" in core.cells.snapshot()["cells"][0]["activity"]
     finally:
         core.shutdown()

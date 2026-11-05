@@ -111,12 +111,20 @@ class BasemapFetcher(BasemapStage):
         tiles, ancestors = plan_cell(self._archive(url), cx, cy, self.max_zoom())
         return sum(length for _o, length in {(t[3], t[4]) for t in tiles + ancestors})
 
-    def fetch(self, x: int, y: int, work: Path, cancel: threading.Event, progress: Callable[[float], None]) -> dict:
+    def fetch(
+        self,
+        x: int,
+        y: int,
+        work: Path,
+        cancel: threading.Event,
+        progress: Callable[[float], None],
+        received: Callable[[int], None] | None = None,
+    ) -> dict:
         for attempt in (1, 2):
             key, url = self.selector.current()
             try:
                 archive = self._archive(url)
-                return self._extract(archive, key, x, y, work, cancel, progress)
+                return self._extract(archive, key, x, y, work, cancel, progress, received or (lambda n: None))
             except ArchiveGone:
                 if attempt == 2 or self.selector.source() != "auto":
                     raise
@@ -126,7 +134,7 @@ class BasemapFetcher(BasemapStage):
                     self._archives = {}
         raise RuntimeError("unreachable")
 
-    def _extract(self, archive, key, cx, cy, work, cancel, progress) -> dict:
+    def _extract(self, archive, key, cx, cy, work, cancel, progress, received) -> dict:
         max_zoom = min(self.max_zoom(), archive.header.max_zoom)
         tiles, ancestors = plan_cell(archive, cx, cy, max_zoom, cancel)
         pieces = [(t[3], t[4]) for t in tiles + ancestors]
@@ -135,6 +143,7 @@ class BasemapFetcher(BasemapStage):
 
         def advance(n: int) -> None:
             done[0] += n
+            received(n)
             progress(min(1.0, done[0] / total))
 
         blobs = archive.fetch_ranges(pieces, cancel, advance)

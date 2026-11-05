@@ -125,7 +125,7 @@ def test_clear_cache_removes_everything_and_resets(home, hooks):
         core.settings.save(home)
         core.cells.apply(["210-97"], [], None)
         assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached")
-        core.online.cache.put("osm", 1, 0, 0, __import__("offline_railway_map.online_tiles", fromlist=["CachedTile"]).CachedTile(b"x", None, None, 0))
+        core.online.cache.put("orm", 1, 0, 0, __import__("offline_railway_map.online_tiles", fromlist=["CachedTile"]).CachedTile(b"x", None, None, 0))
         assert core.rail.tile(5, 210 >> 3, 97 >> 3)  # creates the low-zoom disk cache
         assert core.estimate(["211-97"])["bytes"] > 0
 

@@ -1,6 +1,9 @@
 // Page entry point.
 import { api, setOnlineOrigin, subscribe } from './api.js';
-import { addBasemap, loadBasemapStyle, refreshBasemap, setBasemapMaxzoom } from './basemap.js';
+import {
+  addBasemap, loadBasemapStyles, onlineBasemapLayers, onlineBasemapUsable, refreshBasemap, setBasemapMaxzoom,
+  setBasemapMode,
+} from './basemap.js';
 import { Cells, renderDownloadPanel } from './grid.js';
 import { setupClearButton } from './clear.js';
 import { setupDetails } from './details.js';
@@ -67,12 +70,13 @@ async function boot() {
 
   const [snapshot] = await Promise.all([
     api.get('/api/cells'),
-    loadBasemapStyle(),
+    loadBasemapStyles(),
     new Promise((resolve) => map.on('load', resolve)),
   ]);
   addGroupMarkers(map);
+  setBasemapMode(map, onlineBasemapUsable(info.status));
   addBasemap(map, snapshot.basemapMaxzoom);
-  addOnlineLayers(map);
+  addOnlineLayers(map, onlineBasemapLayers());
   addRailLayers(map);
 
   const cells = new Cells(map, {
@@ -100,7 +104,10 @@ async function boot() {
 
   subscribe({
     hello: () => { document.body.dataset.connected = 'true'; },
-    status: renderStatus,
+    status: (status) => {
+      renderStatus(status);
+      setBasemapMode(map, onlineBasemapUsable(status));
+    },
     cells: (snap) => {
       cells.setSnapshot(snap);
       setBasemapMaxzoom(map, snap.basemapMaxzoom);

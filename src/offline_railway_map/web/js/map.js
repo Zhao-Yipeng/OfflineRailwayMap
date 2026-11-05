@@ -15,7 +15,8 @@ function baseStyle() {
     sprite: url('/app/vendor/sprites/v4/grayscale'),
     sources: {},
     layers: [
-      { id: 'background', type: 'background', paint: { 'background-color': '#e8e8e8' } },
+      // Land colour of both basemaps (OpenMapTiles has no land polygons; SPEC §7.2).
+      { id: 'background', type: 'background', paint: { 'background-color': '#cccccc' } },
     ],
   };
 }

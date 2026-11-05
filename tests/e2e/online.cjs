@@ -1,5 +1,6 @@
-// M1 check: online ORM tiles render through the local proxy; status line
-// reports refused services.  Makes a handful of real tile requests (one view).
+// M1 check: the online basemap (OpenFreeMap) and ORM tiles render through the
+// local proxy; the status line reports refused services.  Makes a handful of
+// real tile requests (one view).
 const { openPage } = require('./harness.cjs');
 
 (async () => {
@@ -21,6 +22,13 @@ const { openPage } = require('./harness.cjs');
     const ormLoaded = await page.evaluate(() => window.__ormTiles);
     console.log('ORM tiles loaded:', ormLoaded);
     if (!ormLoaded) problems.push('no ORM tiles loaded');
+    const basemap = await page.evaluate(() => {
+      const features = window.__map.queryRenderedFeatures().filter((f) => f.source === 'online');
+      return { features: features.length, labels: features.filter((f) => f.layer.type === 'symbol').map((f) => f.properties.name).slice(0, 5) };
+    });
+    console.log('online basemap:', JSON.stringify(basemap));
+    if (!basemap.features) problems.push('no online basemap features rendered');
+    if (status.includes('拒绝')) problems.push(`a service refused the program: ${status}`);
     if (shot) await page.screenshot({ path: shot });
   } finally {
     await close();

@@ -227,7 +227,10 @@ class AppCore:
         add("GET", r"/tiles/rail/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_rail)
         add("GET", r"/tiles/basemap/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_basemap)
         self.online_router.add(
-            "GET", r"/tiles/(?P<source>osm|orm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.png", self._tile_online
+            "GET", r"/tiles/(?P<source>orm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.png", self._tile_online
+        )
+        self.online_router.add(
+            "GET", r"/tiles/(?P<source>ofm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.pbf", self._tile_online
         )
 
     def _api_info(self, _req: Request) -> Response:
@@ -415,4 +418,6 @@ class AppCore:
     def _tile_online(self, req: Request) -> Response:
         p = req.params
         data = self.online.tile(p["source"], int(p["z"]), int(p["x"]), int(p["y"]))
+        if self.online.sources[p["source"]].kind == "vector":
+            return Response(200 if data else 204, data, "application/x-protobuf", PNG_HEADERS)
         return Response(200, data, "image/png", PNG_HEADERS)

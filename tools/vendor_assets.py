@@ -34,6 +34,15 @@ ASSETS_CDN = f"https://cdn.jsdelivr.net/gh/protomaps/basemaps-assets@{ASSETS_SHA
 FONT_STACKS = ("Noto Sans Regular", "Noto Sans Medium", "Noto Sans Italic", "Noto Sans Devanagari Regular v1")
 SPRITES = ("grayscale.json", "grayscale.png", "grayscale@2x.json", "grayscale@2x.png")
 
+# OpenFreeMap "Positron" style for the online basemap (SPEC §7.2).  The repository
+# has no release tags, so the files are pinned by content: a change upstream
+# stops this script until the new version has been reviewed.
+OFM_STYLES = "gh/hyperknot/openfreemap-styles@main"
+OFM_FILES = {
+    "styles/positron/style.json": "PJg7viR7sRbL/VGSQi6jyKXTIwNiZXqsZc34xUb46RM=",
+    "styles/positron/LICENSE.md": "3m2TJuZXR19nlbMnkjrrn9y8xF+U6EOAxQru4qa/MGQ=",
+}
+
 
 def _is_cjk_range(start: int) -> bool:
     """CJK ideographs and Hangul syllables are drawn with system fonts (SPEC §7.7)."""
@@ -125,8 +134,32 @@ def vendor_sprites() -> None:
         print(f"  {(out / Path(entry['name']).name).relative_to(ROOT)}")
 
 
+def vendor_online_style() -> None:
+    print(f"{OFM_STYLES} positron")
+    sys.path.insert(0, str(ROOT / "tools"))
+    from build_online_style import convert
+
+    files = {}
+    for name, expected in OFM_FILES.items():
+        data = fetch(f"https://cdn.jsdelivr.net/{OFM_STYLES}/{name}")
+        digest = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+        if digest != expected:
+            raise SystemExit(f"{name} changed upstream (sha256 {digest}); review it, then update OFM_FILES")
+        files[name] = data
+    out = VENDOR / "basemap"
+    layers = convert(json.loads(files["styles/positron/style.json"]))
+    (out / "online-layers.json").write_text(json.dumps(layers, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    (out / "POSITRON-LICENSE.md").write_bytes(files["styles/positron/LICENSE.md"])
+    print(f"  {len(layers)} layers -> {(out / 'online-layers.json').relative_to(ROOT)}")
+
+
 def main(argv: list[str]) -> int:
-    steps = {"maplibre": vendor_maplibre, "fonts": vendor_fonts, "sprites": vendor_sprites}
+    steps = {
+        "maplibre": vendor_maplibre,
+        "fonts": vendor_fonts,
+        "sprites": vendor_sprites,
+        "online-style": vendor_online_style,
+    }
     wanted = argv or list(steps)
     for name in wanted:
         steps[name]()

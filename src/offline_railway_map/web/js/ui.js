@@ -6,6 +6,7 @@ export const $ = (id) => document.getElementById(id);
 export function formatBytes(bytes) {
   if (!bytes) return '0 MB';
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes < 1e5) return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
   return `${(bytes / 1e6).toFixed(1)} MB`;
 }
 
@@ -87,7 +88,9 @@ export function renderAttribution() {
     'Data ', externalLink('© OpenStreetMap contributors', 'https://www.openstreetmap.org/copyright'),
     ' | Style: ', externalLink('CC-BY-SA 2.0', 'https://creativecommons.org/licenses/by-sa/2.0/'), ' ',
     externalLink('OpenRailwayMap', 'https://www.openrailwaymap.org/'), ' and OpenStreetMap',
-    ' | Basemap: ', externalLink('Protomaps', 'https://protomaps.com/'),
+    ' | Basemap: ', externalLink('OpenFreeMap', 'https://openfreemap.org/'), ' ',
+    externalLink('© OpenMapTiles', 'https://www.openmaptiles.org/'), ', ',
+    externalLink('Protomaps', 'https://protomaps.com/'),
   );
 }
 

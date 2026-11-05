@@ -1,14 +1,21 @@
-"""Online raster tiles for uncached areas (SPEC §7.2, §7.8, §10.3, §12.2, §12.3).
+"""Online tiles for uncached areas (SPEC §7.2, §7.8, §10.3, §12.2, §12.3).
+
+Two sources: the OpenFreeMap vector basemap and the OpenRailwayMap speed
+layer (raster).
 
 * tiles are requested only when the page asks for them (current view);
-* the disk cache follows the servers' caching headers (7 days when absent);
+* the disk cache follows the servers' caching headers (7 days when absent;
+  OpenFreeMap's ten-year headers are capped at 7 days so the map stays current);
 * expired tiles are revalidated with If-None-Match / If-Modified-Since;
-* ORM answers 429 -> stop asking ORM for 10 minutes;
+* 429 -> stop asking that server for 10 minutes;
 * repeated failures -> exponential back-off from 1 to 15 minutes;
-* a server refusal (OSM "x-blocked", 403) pauses that service for 30 minutes
+* a server refusal ("x-blocked", 403) pauses that service for 30 minutes
   and is never cached as a tile;
-* parts covered by cached cells are made transparent, and tiles fully inside
-  cached cells are never requested.
+* tiles fully inside cached cells are never requested; for raster tiles the
+  parts covered by cached cells are made transparent (vector tiles are hidden
+  there by the page's mask layer instead);
+* OpenFreeMap's tile URLs contain a weekly version: the current one is read
+  from its TileJSON, which is re-read when a tile URL stops working.
 """
 
 from __future__ import annotations
@@ -41,17 +48,27 @@ BLOCK_PAUSE = 1800.0
 class OnlineSource:
     name: str
     label: str
-    url_template: str
+    url_template: str  # "{z}/{x}/{y}" template; empty when read from ``tilejson``
     timeout: float
     min_zoom: int
     max_zoom: int
     pause_on_429: float = 600.0
+    kind: str = "raster"  # or "vector"
+    tilejson: str | None = None
+    max_ttl: float | None = None  # cap on the servers' cache lifetime
+    parallel: int = 2  # concurrent requests to the server
 
 
 SOURCES = (
-    OnlineSource("osm", "OSM 底图", "https://tile.openstreetmap.org/{z}/{x}/{y}.png", 10.0, 0, 19),
+    OnlineSource(
+        "ofm", "在线底图（OpenFreeMap）", "", 10.0, 0, 14, kind="vector",
+        tilejson="https://tiles.openfreemap.org/planet", max_ttl=7 * 24 * 3600, parallel=4,
+    ),
     OnlineSource("orm", "ORM 瓦片", "https://tiles.openrailwaymap.org/maxspeed/{z}/{x}/{y}.png", 5.0, 2, 19),
 )
+VECTOR_TYPES = ("application/vnd.mapbox-vector-tile", "application/x-protobuf", "application/octet-stream")
+TILEJSON_TTL = (600.0, 24 * 3600.0)  # re-read the TileJSON at most / at least this often
+TILEJSON_RETRY = 30.0  # after a failed read, tiles wait this long before trying again
 
 
 @dataclass
@@ -255,20 +272,71 @@ class OnlineTiles:
         self._breakers = {name: _Breaker() for name in self.sources}
         self._flights: dict[tuple, _Flight] = {}
         self._flights_lock = threading.Lock()
+        self._templates: dict[str, tuple[str, float]] = {}  # source -> (url template, valid until)
+        self._templates_lock = threading.Lock()
+        self._tilejson_fetch = threading.Lock()
+        self._tilejson_failed: dict[str, float] = {}
+        for source in sources:
+            http.set_host_limit(source.tilejson or source.url_template, source.parallel)
 
     def tile(self, name: str, z: int, x: int, y: int) -> bytes:
+        """The tile for the page: PNG for raster sources, MVT (b"" = empty) for vector ones."""
         source = self.sources[name]
+        empty = b"" if source.kind == "vector" else TRANSPARENT_PNG
         if not (source.min_zoom <= z <= source.max_zoom and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
-            return TRANSPARENT_PNG
+            return empty
         mask = self.coverage.tile_mask(z, x, y)
         if mask is not None and mask.full:
-            return TRANSPARENT_PNG
+            return empty
         data = self._fetch(source, z, x, y)
         if data is None:
-            return TRANSPARENT_PNG
-        if mask is not None:
+            return empty
+        if mask is not None and source.kind == "raster":
             return apply_mask(data, mask.rects)
         return data
+
+    # -- tile URLs -------------------------------------------------------------------------
+
+    def _template(self, source: OnlineSource, refresh: bool = False) -> str | None:
+        if source.tilejson is None:
+            return source.url_template
+        now = time.time()
+        with self._templates_lock:
+            known = self._templates.get(source.name)
+        if known is not None and known[1] > now and not refresh:
+            return known[0]
+        with self._tilejson_fetch:  # one request for all the tiles waiting for it
+            with self._templates_lock:
+                latest = self._templates.get(source.name)
+            if latest is not None and latest is not known and latest[1] > time.time():
+                return latest[0]
+            if time.time() - self._tilejson_failed.get(source.name, 0.0) < TILEJSON_RETRY:
+                return known[0] if known else None  # it just failed for another tile
+            return self._read_tilejson(source, known)
+
+    def _read_tilejson(self, source: OnlineSource, known: tuple[str, float] | None) -> str | None:
+        now = time.time()
+        try:
+            response = self.http.get(source.tilejson, timeout=source.timeout)
+            if response.status_code != 200:
+                raise ValueError(f"HTTP {response.status_code}")
+            template = response.json()["tiles"][0]
+            if not template.startswith("https://") or "{z}" not in template:
+                raise ValueError(f"unexpected tile URL {template!r}")
+        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+            if isinstance(exc, requests.ConnectionError):
+                self.status.network_down()
+            self._tilejson_failed[source.name] = time.time()
+            self._failure(source)
+            log.info("%s: could not read %s: %s", source.name, source.tilejson, exc)
+            return known[0] if known else None  # an older template still works for a while
+        expires, _ = expiry_from_headers(response.headers, now)
+        valid_until = now + min(max(expires - now, TILEJSON_TTL[0]), TILEJSON_TTL[1])
+        with self._templates_lock:
+            self._templates[source.name] = (template, valid_until)
+        if known is None or known[0] != template:
+            log.info("%s tiles: %s", source.name, template)
+        return template
 
     # -- fetching ----------------------------------------------------------------------
 
@@ -297,9 +365,14 @@ class OnlineTiles:
             with self._flights_lock:
                 self._flights.pop(key, None)
 
-    def _download(self, source: OnlineSource, z: int, x: int, y: int, cached: CachedTile | None) -> bytes | None:
+    def _download(
+        self, source: OnlineSource, z: int, x: int, y: int, cached: CachedTile | None, retry: bool = True
+    ) -> bytes | None:
         stale = cached.data if cached else None
-        url = source.url_template.format(z=z, x=x, y=y)
+        template = self._template(source)
+        if template is None:
+            return stale
+        url = template.format(z=z, x=x, y=y)
         headers = {}
         if cached is not None and cached.etag:
             headers["If-None-Match"] = cached.etag
@@ -336,15 +409,23 @@ class OnlineTiles:
             self._success(source)
             return cached.data
         if response.status_code == 404:
+            if source.tilejson and retry:
+                # The weekly version in the URL may be gone: read the TileJSON again.
+                if self._template(source, refresh=True) not in (None, template):
+                    return self._download(source, z, x, y, cached, retry=False)
             self._success(source)
             return None
         if response.status_code != 200 or not response.content:
             self._failure(source)
             return stale
-        if not response.headers.get("Content-Type", "image/png").startswith("image/"):
+        content_type = response.headers.get("Content-Type", "")
+        expected = VECTOR_TYPES if source.kind == "vector" else ("image/",)
+        if content_type and not content_type.startswith(expected):
             self._failure(source)
             return stale
         expires, storable = expiry_from_headers(response.headers, now)
+        if source.max_ttl is not None:
+            expires = min(expires, now + source.max_ttl)
         if storable:
             tile = CachedTile(
                 response.content, response.headers.get("ETag"), response.headers.get("Last-Modified"), expires

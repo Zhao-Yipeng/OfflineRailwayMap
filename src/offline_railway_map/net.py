@@ -35,6 +35,12 @@ class Http:
         )
         self._slots_lock = threading.Lock()
 
+    def set_host_limit(self, url: str, limit: int) -> None:
+        """Allow ``limit`` concurrent requests to the host of ``url`` (default ``per_host``)."""
+        host = urlsplit(url).netloc
+        with self._slots_lock:
+            self._slots[host] = threading.BoundedSemaphore(limit)
+
     @contextmanager
     def host_slot(self, url: str):
         host = urlsplit(url).netloc

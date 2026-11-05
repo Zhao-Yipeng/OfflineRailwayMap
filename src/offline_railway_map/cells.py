@@ -17,7 +17,9 @@ from .store import StateStore
 log = logging.getLogger(__name__)
 
 
-def public_cell(row: dict) -> dict:
+def public_cell(row: dict, live: dict | None = None) -> dict:
+    """A cell for the page; ``live`` adds what the downloader is doing right now."""
+    live = live or {}
     return {
         "id": row["id"],
         "x": row["x"],
@@ -31,6 +33,10 @@ def public_cell(row: dict) -> dict:
         "basemapAt": row["basemap_at"],
         "basemapMaxzoom": row["basemap_maxzoom"],
         "bytes": (row["rail_bytes"] or 0) + (row["basemap_bytes"] or 0),
+        "activity": live.get("text"),
+        "activitySince": live.get("since"),
+        "activityUntil": live.get("until"),
+        "receivedBytes": live.get("bytes", 0),
     }
 
 
@@ -53,6 +59,9 @@ class CellService:
         self._on_queue: list[Callable[[], None]] = []
         self._on_delete: list[Callable[[list[str]], None]] = []
         self._on_coverage: list[Callable[[], None]] = []
+        # What the downloader is doing per cell (memory only, SPEC §6.5).
+        self._live: dict[str, dict] = {}
+        self._live_lock = threading.Lock()
 
     # -- wiring ----------------------------------------------------------------------------
 
@@ -78,8 +87,10 @@ class CellService:
     def snapshot(self) -> dict:
         rows = self.store.cells()
         zooms = [r["basemap_maxzoom"] for r in rows if r["status"] in ("cached", "updating") and r["basemap_maxzoom"]]
+        with self._live_lock:
+            live = {cid: dict(info) for cid, info in self._live.items()}
         return {
-            "cells": [public_cell(row) for row in rows],
+            "cells": [public_cell(row, live.get(row["id"])) for row in rows],
             "paused": self.paused,
             "tilesVersion": self.tiles_version,
             # The basemap source can only have one max zoom: the lowest of the cached cells.
@@ -92,7 +103,25 @@ class CellService:
     def publish_cell(self, cid: str) -> None:
         row = self.store.cell(cid)
         if row:
-            self.events.publish("cell", public_cell(row))
+            with self._live_lock:
+                live = dict(self._live.get(cid, {}))
+            self.events.publish("cell", public_cell(row, live))
+
+    # -- live download information --------------------------------------------------------
+
+    def set_activity(self, cid: str, text: str, since: float | None = None, until: float | None = None) -> None:
+        with self._live_lock:
+            info = self._live.setdefault(cid, {"bytes": 0})
+            info.update(text=text, since=since, until=until)
+
+    def add_received(self, cid: str, size: int) -> None:
+        with self._live_lock:
+            info = self._live.setdefault(cid, {"bytes": 0, "text": None, "since": None, "until": None})
+            info["bytes"] = info.get("bytes", 0) + size
+
+    def clear_live(self, cid: str) -> None:
+        with self._live_lock:
+            self._live.pop(cid, None)
 
     # -- changes ------------------------------------------------------------------------------
 
@@ -205,6 +234,8 @@ class CellService:
 
     def reset(self) -> None:
         """After the data folder was deleted: nothing is cached any more."""
+        with self._live_lock:
+            self._live.clear()
         self.coverage.replace(set())
         self.tiles_version += 1
         self.events.publish("tiles", {"version": self.tiles_version})

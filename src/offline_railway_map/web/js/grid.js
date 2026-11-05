@@ -240,6 +240,14 @@ export class Cells {
     map.addSource('cell-points', { type: 'geojson', data: empty });
     map.addSource('grid', { type: 'geojson', data: empty });
     map.addSource('cell-hover', { type: 'geojson', data: empty });
+    map.addSource('cached-mask', { type: 'geojson', data: empty });
+    // Hides the online basemap inside cached cells, where the offline basemap
+    // is drawn on top (SPEC §7.8).  From z8 on, like the offline basemap
+    // while online (see basemap.js).
+    addToGroup(map, 'mask', {
+      id: 'cached-mask', type: 'fill', source: 'cached-mask', minzoom: 8,
+      paint: { 'fill-color': '#cccccc', 'fill-antialias': false },
+    });
     addToGroup(map, 'grid', {
       id: 'cells-edit-fill', type: 'fill', source: 'cells',
       paint: {
@@ -303,6 +311,14 @@ export class Cells {
     const ids = new Set([...this.cells.keys(), ...this.pendingAdd]);
     const polygons = [];
     const points = [];
+    const masked = [];
+    for (const row of this.cells.values()) {
+      if (row.status === 'cached' || row.status === 'updating') {
+        const { x, y } = parseCellId(row.id);
+        masked.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: cellRing(x, y) } });
+      }
+    }
+    this.map.getSource('cached-mask').setData({ type: 'FeatureCollection', features: masked });
     for (const id of ids) {
       const state = this.displayState(id);
       if (!state) continue;
@@ -513,16 +529,40 @@ export class Cells {
 }
 
 export function downloadSummary(cells) {
-  let active = 0, cached = 0, failed = 0, bytes = 0, current = null;
+  let active = 0, cached = 0, failed = 0, bytes = 0, current = null, waiting = null;
+  const now = Date.now() / 1000;
   for (const row of cells.cells.values()) {
     if (['queued', 'downloading', 'updating'].includes(row.status) && (row.status !== 'updating' || row.updateKind)) active += 1;
     if (row.status === 'cached') cached += 1;
     if (row.status === 'failed') failed += 1;
     if (row.status === 'downloading' || (row.status === 'updating' && row.stage)) current = row;
+    // a cell sent back to the queue says why and until when (servers busy, offline)
+    if (!waiting && row.status === 'queued' && row.activity && (row.activityUntil || 0) > now) waiting = row;
     bytes += row.bytes || 0;
   }
-  return { active, cached, failed, bytes, current };
+  return { active, cached, failed, bytes, current: current || waiting };
 }
+
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`;
+  return `${Math.floor(s / 3600)} 小时 ${Math.floor((s % 3600) / 60)} 分`;
+}
+
+function timerText(since, until) {
+  const now = Date.now() / 1000;
+  if (until) return `，${formatDuration(until - now)}后`;
+  if (since) return `，已等待 ${formatDuration(now - since)}`;
+  return '';
+}
+
+// Waiting and retry timers tick every second without a message from the backend.
+setInterval(() => {
+  for (const node of document.querySelectorAll('.live-timer')) {
+    node.textContent = timerText(Number(node.dataset.since) || null, Number(node.dataset.until) || null);
+  }
+}, 1000);
 
 // Rough remaining time from the cells finished during this session (SPEC §6.5).
 const finished = [];
@@ -544,18 +584,32 @@ export function renderDownloadPanel(cells) {
   const { active, cached, failed, bytes, current } = downloadSummary(cells);
   const eta = remainingText(cached, active);
   if (!active && !failed) {
+    panel.replaceChildren(); // also stops its timers
     panel.hidden = true;
     return;
   }
   const parts = [];
+  let detail = null;
   if (active) {
     const head = cells.paused ? '已暂停' : '下载中';
     parts.push(el('span', { class: 'strong' }, `${head} ${cached}/${cached + active}`));
     if (current && !cells.paused) {
-      const stage = STAGE_LABELS[current.stage] || '准备';
-      parts.push(el('span', {}, ` · ${current.id} ${stage} ${Math.round((current.progress || 0) * 100)}%`));
+      if (current.status === 'queued') {
+        parts.push(el('span', {}, ` · ${current.id} 等待重试`));
+      } else {
+        const stage = STAGE_LABELS[current.stage] || '准备';
+        parts.push(el('span', {}, ` · ${current.id} ${stage} ${Math.round((current.progress || 0) * 100)}%`));
+      }
+      if (current.activity) {
+        const since = current.activitySince || '';
+        const until = current.activityUntil || '';
+        detail = el('div', { class: 'panel-detail' },
+          current.activity,
+          el('span', { class: 'live-timer', 'data-since': since, 'data-until': until }, timerText(since, until)),
+          current.receivedBytes ? ` · 本格已接收 ${formatBytes(current.receivedBytes)}` : '');
+      }
     }
-    parts.push(el('span', { class: 'muted' }, ` · 已下载 ${formatBytes(bytes)}${cells.paused ? '' : eta}`));
+    parts.push(el('span', { class: 'muted' }, ` · 已缓存 ${formatBytes(bytes)}${cells.paused ? '' : eta}`));
     parts.push(el('button', {
       type: 'button',
       onclick: () => api.post('/api/downloads/pause', { paused: !cells.paused }).catch((e) => toast(e.message, 'error')),
@@ -569,6 +623,6 @@ export function renderDownloadPanel(cells) {
       onclick: () => api.post('/api/cells/retry', { ids: failedIds }).catch((e) => toast(e.message, 'error')),
     }, '全部重试'));
   }
-  panel.replaceChildren(...parts);
+  panel.replaceChildren(el('div', { class: 'panel-row' }, ...parts), ...(detail ? [detail] : []));
   panel.hidden = false;
 }

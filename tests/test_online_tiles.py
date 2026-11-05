@@ -36,14 +36,28 @@ def fake():
     server.stop()
 
 
+MVT = b"\x1a\x05fake!"  # the proxy does not look inside vector tiles
+WEEK = 7 * 24 * 3600
+
+
 def make_tiles(home, fake_url: str, coverage: CellCoverage | None = None, limit_mb: int = 2048):
     sources = (
-        OnlineSource("osm", "OSM 底图", fake_url + "/osm/{z}/{x}/{y}.png", 2.0, 0, 19),
+        OnlineSource(
+            "ofm", "在线底图", "", 2.0, 0, 14, kind="vector", tilejson=fake_url + "/planet", max_ttl=WEEK, parallel=4
+        ),
         OnlineSource("orm", "ORM 瓦片", fake_url + "/orm/{z}/{x}/{y}.png", 2.0, 2, 19),
     )
     status = NetStatus(EventBus())
     tiles = OnlineTiles(home, Http(), status, coverage or CellCoverage(), lambda: limit_mb, sources)
     return tiles, status
+
+
+def tilejson(fake, version: str):
+    fake.routes["/planet"] = lambda r: (
+        200,
+        {"Content-Type": "application/json", "Cache-Control": "max-age=3600"},
+        ('{"tiles": ["%s/%s/{z}/{x}/{y}.pbf"], "maxzoom": 14}' % (fake.url.replace("http://", "https://"), version)).encode(),
+    )
 
 
 def test_empty_tile_is_fully_transparent():
@@ -74,11 +88,11 @@ def test_expired_tile_is_revalidated(home, fake):
             return 304, {"Cache-Control": "max-age=3600", "ETag": '"v1"'}, b""
         return 200, {"Content-Type": "image/png", "Cache-Control": "max-age=0", "ETag": '"v1"'}, RED
 
-    fake.routes["/osm/5/1/2.png"] = reply
+    fake.routes["/orm/5/1/2.png"] = reply
     tiles, _ = make_tiles(home, fake.url)
-    assert tiles.tile("osm", 5, 1, 2) == RED
-    assert tiles.tile("osm", 5, 1, 2) == RED  # stale -> conditional request -> 304
-    assert tiles.tile("osm", 5, 1, 2) == RED  # fresh again -> no request
+    assert tiles.tile("orm", 5, 1, 2) == RED
+    assert tiles.tile("orm", 5, 1, 2) == RED  # stale -> conditional request -> 304
+    assert tiles.tile("orm", 5, 1, 2) == RED  # fresh again -> no request
     assert calls == [None, '"v1"']
     tiles.close()
 
@@ -94,14 +108,14 @@ def test_429_pauses_the_service(home, fake):
 
 
 def test_refusal_is_not_cached_and_reported(home, fake):
-    fake.routes["/osm/3/1/1.png"] = lambda r: (
+    fake.routes["/orm/3/1/1.png"] = lambda r: (
         200,
         {"Content-Type": "image/png", "x-blocked": "Access denied. See policy", "Cache-Control": "no-cache"},
         RED,
     )
     tiles, status = make_tiles(home, fake.url)
-    assert tiles.tile("osm", 3, 1, 1) == TRANSPARENT_PNG
-    service = status.snapshot()["services"]["osm"]
+    assert tiles.tile("orm", 3, 1, 1) == TRANSPARENT_PNG
+    service = status.snapshot()["services"]["orm"]
     assert service["state"] == "blocked"
     assert "拒绝访问" in service["message"]
     assert not home.data_exists(), "a refusal image must never be stored as a tile"
@@ -113,9 +127,9 @@ def test_stale_tile_is_used_when_the_network_is_down(home):
         s.bind(("127.0.0.1", 0))
         dead = f"http://127.0.0.1:{s.getsockname()[1]}"
     tiles, status = make_tiles(home, dead)
-    tiles.cache.put("osm", 4, 3, 2, CachedTile(RED, None, None, time.time() - 10))
+    tiles.cache.put("orm", 4, 3, 2, CachedTile(RED, None, None, time.time() - 10))
     for _ in range(3):
-        assert tiles.tile("osm", 4, 3, 2) == RED
+        assert tiles.tile("orm", 4, 3, 2) == RED
     assert status.snapshot()["network"] == "offline"
     tiles.close()
 
@@ -149,9 +163,9 @@ def test_cache_is_trimmed_to_its_limit(home, fake):
     tiles, _ = make_tiles(home, fake.url, limit_mb=1)
     blob = b"x" * 300_000
     for i in range(10):
-        tiles.cache.put("osm", 10, i, 0, CachedTile(blob, None, None, time.time() + 100))
+        tiles.cache.put("orm", 10, i, 0, CachedTile(blob, None, None, time.time() + 100))
     assert tiles.cache.total_bytes <= 1024 * 1024
-    assert tiles.cache.get("osm", 10, 9, 0) is not None
+    assert tiles.cache.get("orm", 10, 9, 0) is not None
     tiles.close()
 
 
@@ -171,7 +185,8 @@ def test_memory_only_mode_after_clearing(home, fake):
 def test_out_of_range_tiles_are_empty(home, fake):
     tiles, _ = make_tiles(home, fake.url)
     assert tiles.tile("orm", 1, 0, 0) == TRANSPARENT_PNG  # below ORM's min zoom
-    assert tiles.tile("osm", 3, 8, 0) == TRANSPARENT_PNG
+    assert tiles.tile("orm", 3, 8, 0) == TRANSPARENT_PNG  # x out of range
+    assert tiles.tile("ofm", 15, 0, 0) == b""  # above OpenFreeMap's max zoom
     assert fake.count() == 0
     tiles.close()
 
@@ -209,3 +224,87 @@ def test_coverage_masks():
     coverage.replace({(210, 96), (211, 96), (210, 97), (211, 97)})
     assert coverage.tile_mask(7, 105, 48).full
     assert CellCoverage().tile_mask(3, 1, 1) is None
+
+
+# -- OpenFreeMap vector basemap ------------------------------------------------------------
+
+
+def _plain_http_tiles(home, fake, coverage=None):
+    """OnlineTiles whose TileJSON points at the (plain HTTP) fake server."""
+    tiles, status = make_tiles(home, fake.url, coverage)
+    source = tiles.sources["ofm"]
+    tiles.sources["ofm"] = source.__class__(**{**source.__dict__, "tilejson": fake.url + "/planet"})
+    real_template = tiles._template
+
+    def plain_http(src, refresh=False):
+        template = real_template(src, refresh)
+        return template.replace("https://", "http://") if template else template
+
+    tiles._template = plain_http
+    return tiles, status
+
+
+def test_vector_tile_url_comes_from_the_tilejson(home, fake):
+    tilejson(fake, "v1")
+    fake.routes["/v1/9/421/194.pbf"] = lambda r: (
+        200, {"Content-Type": "application/vnd.mapbox-vector-tile", "Cache-Control": "max-age=315360000"}, MVT,
+    )
+    tiles, _ = _plain_http_tiles(home, fake)
+    assert tiles.tile("ofm", 9, 421, 194) == MVT
+    assert tiles.tile("ofm", 9, 421, 194) == MVT
+    assert fake.count("/v1/") == 1 and fake.count("/planet") == 1
+    cached = tiles.cache.get("ofm", 9, 421, 194)
+    assert cached.expires <= time.time() + WEEK + 5, "ten-year cache headers are capped at a week"
+    tiles.close()
+
+
+def test_new_weekly_version_is_picked_up_when_old_tiles_disappear(home, fake):
+    tilejson(fake, "v1")
+    fake.routes["/v1/9/1/1.pbf"] = lambda r: (200, {"Content-Type": "application/x-protobuf"}, MVT)
+    tiles, _ = _plain_http_tiles(home, fake)
+    assert tiles.tile("ofm", 9, 1, 1) == MVT
+    # the server moves on to v2; v1 tiles are gone
+    tilejson(fake, "v2")
+    fake.routes["/v2/9/1/2.pbf"] = lambda r: (200, {"Content-Type": "application/x-protobuf"}, MVT + b"2")
+    assert tiles.tile("ofm", 9, 1, 2) == MVT + b"2"
+    assert fake.count("/v1/9/1/2.pbf") == 1 and fake.count("/planet") == 2
+    assert tiles.tile("ofm", 9, 1, 1) == MVT, "tiles already cached are still used"
+    tiles.close()
+
+
+def test_vector_tiles_inside_cached_cells_are_not_requested(home, fake):
+    tilejson(fake, "v1")
+    fake.default = lambda r: (200, {"Content-Type": "application/x-protobuf"}, MVT)
+    tiles, _ = _plain_http_tiles(home, fake, CellCoverage({(210, 97)}))
+    assert tiles.tile("ofm", 8, 210, 97) == b""
+    assert tiles.tile("ofm", 12, 210 * 16 + 3, 97 * 16 + 4) == b""
+    assert fake.count() == 0
+    assert tiles.tile("ofm", 7, 105, 48) == MVT, "partly cached: unchanged, the page masks it"
+    tiles.close()
+
+
+def test_unreachable_tilejson_gives_empty_tiles(home):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{s.getsockname()[1]}"
+    tiles, status = make_tiles(home, dead)
+    for _ in range(3):
+        assert tiles.tile("ofm", 5, 1, 1) == b""
+    assert tiles._breakers["ofm"].failures == 1, "tried once, then waits before asking again"
+    tiles.close()
+
+
+def test_tilejson_is_read_once_for_tiles_requested_together(home, fake):
+    import threading
+
+    tilejson(fake, "v1")
+    fake.default = lambda r: (200, {"Content-Type": "application/x-protobuf"}, MVT)
+    tiles, _ = _plain_http_tiles(home, fake)
+    threads = [threading.Thread(target=tiles.tile, args=("ofm", 6, i, 20)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert fake.count("/planet") == 1
+    assert fake.count("/v1/") == 6
+    tiles.close()

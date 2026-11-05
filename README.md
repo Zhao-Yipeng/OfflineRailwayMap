@@ -12,7 +12,7 @@
 - **编辑模式**：单击选择方格，Shift + 拖动框选，Alt + 拖动框选取消；右键已缓存的方格可以更新或删除。
 - **开始浏览**：选中的方格在后台下载（铁路数据来自 Overpass API，离线底图来自 Protomaps），下完一格就立即改用本地数据显示。
 - **缓存区域**：任何缩放级别都显示干线、支线、在建和规划线路，并按速度着色（与网页版相同的颜色）；z9 起标速度数字；站线、渡线等配线放大后才显示；离线底图和车站名断网也能用。
-- **未缓存区域**：与 OpenRailwayMap 网页版的「最高速度」图层一致，联网边看边加载。
+- **未缓存区域**：铁路与 OpenRailwayMap 网页版的「最高速度」图层一致，联网边看边加载；底图来自 OpenFreeMap，配色与离线底图相同。
 - 搜索车站和地名、点击线路看详情、速度图例、设置。
 - **清空缓存**：左下角按钮一键删除程序产生的全部数据，程序文件夹恢复到刚解压时的样子。
 
@@ -38,18 +38,21 @@
 | 数据 / 服务 | 用途 | 条款 |
 |-------------|------|------|
 | OpenRailwayMap 瓦片与搜索 API | 未缓存区域的速度图层、车站搜索 | 只限免费、公开的非商业程序使用；必须带本程序的 User-Agent；只按需请求；收到 429 停止访问。<https://wiki.openstreetmap.org/wiki/OpenRailwayMap/API> |
-| OpenStreetMap 标准瓦片 | 未缓存区域的灰色底图 | 按 HTTP 缓存头缓存，禁止预取和批量下载。<https://operations.osmfoundation.org/policies/tiles/> |
+| OpenFreeMap 矢量瓦片 | 未缓存区域的灰色底图（按离线底图的配色显示） | 免费、不限访问量、不需要注册；必须署名。只按视野请求，按 HTTP 缓存头缓存（最多 7 天）。<https://openfreemap.org/tos/> |
 | Overpass API | 下载方格的铁路数据 | 同一时间只发一个请求，记录每天的用量。 |
 | Protomaps 每日构建 | 离线底图 | 按方格一次性读取需要的部分。<https://docs.protomaps.com/basemaps/downloads> |
 | Nominatim | 地名搜索 | 每秒最多一次，只在按回车时搜索。<https://operations.osmfoundation.org/policies/nominatim/> |
 
-地图数据 © OpenStreetMap contributors（ODbL）。缓存区域的速度颜色、线宽和显示规则取自 [OpenRailwayMap-CartoCSS](https://github.com/OpenRailwayMap/OpenRailwayMap-CartoCSS)（GPL-3.0-or-later）。
+不使用 OpenStreetMap 官方瓦片服务器（tile.openstreetmap.org）：它的使用政策规定离线类程序不得使用，实测本程序的请求会被拦截。
+
+地图数据 © OpenStreetMap contributors（ODbL）。在线底图 OpenFreeMap © OpenMapTiles。缓存区域的速度颜色、线宽和显示规则取自 [OpenRailwayMap-CartoCSS](https://github.com/OpenRailwayMap/OpenRailwayMap-CartoCSS)（GPL-3.0-or-later）。
 
 所有请求都带 `OfflineRailwayMap/<版本> (+https://github.com/Zhao-Yipeng/task1)` 这个 User-Agent，不伪装成浏览器，也不伪造 Referer。
 
 ## 已知限制
 
-- 公共 Overpass 服务器有时很忙。程序会自动等待、换服务器、拆分查询；实在不行，方格会回到队列稍后重试，而不是判为失败。设置里可以调整服务器列表。
+- 公共 Overpass 服务器有时很忙。程序会自动等待、换服务器、拆分查询；实在不行，方格会回到队列稍后重试，而不是判为失败。下载面板会实时显示正在等哪台服务器、等了多久、本格已接收多少数据。设置里可以调整服务器列表。
+- 如果下载长时间没有进展，请把程序文件夹里的 `data\logs\app.log` 发给开发者。
 - 离线底图只有一个最大级别：如果不同方格是用不同的「离线底图最大级别」下载的，按其中最低的显示。
 - 离线底图里的阿拉伯文、希伯来文等从右到左的文字没有做字形连接处理。
 
