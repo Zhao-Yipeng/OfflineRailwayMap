@@ -81,14 +81,20 @@ def main(index_url: str = INDEX_URL) -> int:
         index = store.index()
         print(f"index: {len(index.regions)} regions ({time.time() - started:.1f} s)")
         china = index.regions.get("china")
-        if china is not None:
-            print("china's parts:", ", ".join(sorted(k.id for k in china.children)) or "(none)")
         sizes = {}
 
         def size_of(region):
             if region.id not in sizes:
                 sizes[region.id] = store.size_of(region)
             return sizes[region.id]
+
+        if china is not None:
+            print("china's parts:", ", ".join(sorted(k.id for k in china.children)) or "(none)")
+            # What switching on 「永远显示在建线路」 downloads at most (SPEC §7.9)
+            parts = sorted(((size_of(k) or 0, k.id) for k in china.children), reverse=True)
+            print(f"china's parts together: {sum(s for s, _ in parts) / 1e6:.0f} MB "
+                  f"(all of china: {(size_of(china) or 0) / 1e6:.0f} MB); biggest:",
+                  ", ".join(f"{rid} {size / 1e6:.0f} MB" for size, rid in parts[:6]))
 
         problems = 0
         for name, bbox in AREAS.items():
