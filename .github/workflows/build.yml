@@ -71,6 +71,11 @@ jobs:
           # SPEC 11: nothing in the program folder (not even __pycache__) until
           # there is something to keep, and never anything under %APPDATA%,
           # %LOCALAPPDATA% or in the registry (HKCU\Software).
+          # Other software on the runner sometimes writes there meanwhile:
+          # Firefox's background tasks create AppData\...\Mozilla.  Such names
+          # only warn - unless the program itself started that software, which
+          # the list of processes started meanwhile (with their parents) shows.
+          $notOurs = @("Mozilla")
           $program = "dist/OfflineRailwayMap"
           $listProgram = { Get-ChildItem -Recurse -Force -LiteralPath $program | ForEach-Object FullName }
           $watched = @($env:APPDATA, $env:LOCALAPPDATA)
@@ -82,15 +87,31 @@ jobs:
           $beforeRegistry = & $listRegistry
           $beforeTemp = & $listTemp
           $env:QT_QPA_PLATFORM = "offscreen"
+          $started = Get-Date
           $p = Start-Process -FilePath "$program/OfflineRailwayMap.exe" -PassThru
           Start-Sleep -Seconds 20
           if ($p.HasExited) { throw "the program exited early (code $($p.ExitCode))" }
+          # Processes started while the program ran, and which of them it started itself
+          $since = @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -ge $started })
+          $ours = @($p.Id)
+          do {
+            $more = @($since | Where-Object { ($ours -contains $_.ParentProcessId) -and ($ours -notcontains $_.ProcessId) } | ForEach-Object ProcessId)
+            $ours += $more
+          } while ($more.Count)
           Stop-Process -Id $p.Id -Force
           Start-Sleep -Seconds 3
           $newProgram = Compare-Object @($beforeProgram) @(& $listProgram) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
           if ($newProgram) { throw "created in the program folder: $($newProgram -join ', ')" }
-          $new = Compare-Object @($before) @(& $list) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
-          if ($new) { throw "created outside the program folder: $($new -join ', ')" }
+          $new = @(Compare-Object @($before) @(& $list) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject)
+          $others = @($new | Where-Object { $notOurs -contains (Split-Path $_ -Leaf) })
+          $new = @($new | Where-Object { $notOurs -notcontains (Split-Path $_ -Leaf) })
+          if ($others.Count) {
+            Write-Warning "created by other software on the runner: $($others -join ', ')"
+            $since | Format-Table ProcessId, ParentProcessId, Name, CreationDate -AutoSize | Out-String -Width 200 | Write-Host
+            $spawned = @($since | Where-Object { ($ours -contains $_.ProcessId) -and ($_.ProcessId -ne $p.Id) -and ($_.Name -notmatch '^QtWebEngineProcess') })
+            if ($spawned.Count) { throw "the program started other programs: $(($spawned | ForEach-Object Name) -join ', ')" }
+          }
+          if ($new.Count) { throw "created outside the program folder: $($new -join ', ')" }
           $newRegistry = Compare-Object @($beforeRegistry) @(& $listRegistry) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
           if ($newRegistry) { throw "created in the registry: $($newRegistry -join ', ')" }
           $newTemp = Compare-Object @($beforeTemp) @(& $listTemp) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
