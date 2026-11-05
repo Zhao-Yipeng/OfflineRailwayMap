@@ -28,6 +28,7 @@ from typing import Callable
 from . import extracts, overpass, processing
 from .cells import CellService
 from .extracts import EXTRACT_MIN_CELLS, ExtractStore, ExtractUnavailable
+from .grid import cell_id
 from .net import NetStatus
 from .overpass import BudgetExhausted, OverpassClient, ServersBusy
 from .paths import Home
@@ -113,10 +114,12 @@ class Downloader:
             self._threads.append(thread)
 
     def planned_regions(self) -> set[str]:
-        """Regions waiting cells may read: kept when the construction overlay deletes
-        what it downloaded for itself (construction.py), or they would be downloaded
-        again.  Every region a waiting cell touches counts (also for fewer than
-        EXTRACT_MIN_CELLS cells, which use regions already on disk)."""
+        """Regions waiting cells may read: shared with the construction overlay, so it
+        neither asks about them nor deletes them with what it downloaded for itself
+        (construction.py); they would be downloaded again.  A cell the current plan
+        covers reads the regions planned for it (all of China, say, and not its
+        province); for any other cell every region it touches counts (fewer than
+        EXTRACT_MIN_CELLS cells also read regions on disk)."""
         pending = self.store.pending_cells()
         if not pending or self.extracts is None:
             return set()
@@ -124,7 +127,12 @@ class Downloader:
             index = self.extracts.index()
         except Exception:  # noqa: BLE001 - no index, no extracts in use
             return set()
-        return {region.id for x, y in pending for region in index.most_specific(x, y)}
+        plan = self._plan or {}  # replaced as a whole when planned again: read without the lock
+        regions: set[str] = set()
+        for x, y in pending:
+            planned = plan.get(cell_id(x, y))
+            regions.update(planned if planned is not None else (r.id for r in index.most_specific(x, y)))
+        return regions
 
     def queue_changed(self) -> None:
         """Cells were added or removed: plan the data sources again, and get going."""

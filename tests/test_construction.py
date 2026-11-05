@@ -253,13 +253,30 @@ def test_a_region_cells_need_while_it_downloads_is_shared_and_kept(home, geofabr
     assert lines.extracts.db_path("tianjin").exists()
 
 
-def test_regions_waiting_cells_may_read_are_kept(home, geofabrik):
-    lines = make(home, geofabrik, planned={"east1"})
+def test_regions_waiting_cells_will_read_are_neither_asked_about_nor_deleted(home, geofabrik):
+    waiting = {"east1"}  # what the waiting cells' plan reads
+    lines = make(home, geofabrik, planned=waiting)
     lines.settings_changed()
-    wait_for_question(lines)
-    result = lines.decide(delete=True)
-    assert result["kept"] == 1 and lines.extracts.db_path("east1").exists()
-    assert not lines.extracts.db_path("west1").exists()
+    question = wait_for_question(lines)
+    assert sorted(question["regions"]) == sorted(set(PROVINCES) - {"east1"}), "shared: not asked about"
+    result = lines.decide(delete=True, regions=question["regions"])
+    assert result == {"deleted": len(PROVINCES) - 1, "kept": 0, "bytes": result["bytes"]}
+    assert lines.extracts.db_path("east1").exists() and not lines.extracts.db_path("west1").exists()
+    assert lines.question() is None
+    waiting.clear()  # the cells were removed before they read it
+    assert lines.question()["regions"] == ["east1"], "downloaded only for this after all: asked about"
+
+
+def test_an_extract_cells_came_to_need_while_the_question_was_open_is_kept(home, geofabrik):
+    waiting = set()
+    lines = make(home, geofabrik, planned=waiting)
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    assert sorted(question["regions"]) == sorted(PROVINCES)
+    waiting.add("east1")  # cells selected while the dialog was open
+    result = lines.decide(delete=True, regions=question["regions"])
+    assert result["deleted"] == len(PROVINCES) - 1 and result["kept"] == 1, "the page says why"
+    assert lines.extracts.db_path("east1").exists()
 
 
 def test_cells_using_an_extract_kept_for_the_overlay_take_it_over(home, geofabrik):

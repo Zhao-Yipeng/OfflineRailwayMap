@@ -115,6 +115,13 @@ def construction_rows(db: Path, china) -> list[tuple[int, dict, object]]:
     return out
 
 
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def known_ways(db: Path) -> np.ndarray:
     """Every railway way in a filtered extract, whatever it is now (built, under construction ...)."""
     conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
@@ -504,39 +511,50 @@ class ConstructionLines:
         with self._lock:
             if self._thread is not None and self._thread.is_alive() and not self._run.cancel.is_set():
                 return None
-            return self._question_now()
+        return self._question_now()
+
+    def _sorted_out(self, planned: set[str]) -> tuple[list[str], list[str]]:
+        """What this downloaded for itself and is still on disk: (only for this - the
+        question; shared after all - waiting cells will read it, or cells are reading
+        it).  Shared ones stay listed: if no cell reads them in the end, they are asked
+        about later."""
+        alone, shared = [], []
+        for region in self._owned():
+            if not self.extracts.db_path(region).exists():  # deleted meanwhile (expired, cleared)
+                self._db(create=False).execute("DELETE FROM owned WHERE region=?", (region,))
+            elif region in planned or self.extracts.used_by_cells(region) or self.extracts.busy(region):
+                shared.append(region)
+            else:
+                alone.append(region)
+        return alone, shared
 
     def _question_now(self) -> dict | None:
+        planned = self.planned_regions()  # outside the lock: may take a moment
         with self._lock:
-            regions, size = [], 0
-            for region in self._owned():
-                path = self.extracts.db_path(region)
-                if path.exists():
-                    regions.append(region)
-                    size += path.stat().st_size
-                else:  # deleted meanwhile (expired, cleared)
-                    self._db(create=False).execute("DELETE FROM owned WHERE region=?", (region,))
+            regions, _shared = self._sorted_out(planned)
             if not regions:
                 return None
+            size = sum(_size(self.extracts.db_path(r)) for r in regions)
             index = self.extracts._index
             names = [index.regions[r].name if index and r in index.regions else r for r in regions]
             return {"regions": regions, "names": names, "count": len(regions), "bytes": size}
 
-    def decide(self, delete: bool) -> dict:
-        """The answer: delete those extracts now, or keep them 7 days like other extracts."""
+    def decide(self, delete: bool, regions: list[str] | None = None) -> dict:
+        """The answer about ``regions`` (those the question listed; None: all it would list
+        now): delete them now, or keep them 7 days like other extracts.  Checked again
+        first: extracts cells have come to need meanwhile are kept."""
+        planned = self.planned_regions()
         with self._lock:
-            owned = set(self._owned())
-            doomed: set[str] = set()
-            freed = 0
-            if delete and owned:
-                keep = set(self.planned_regions())
-                doomed = {r for r in owned - keep if not self.extracts.used_by_cells(r) and not self.extracts.busy(r)}
-                freed = self.extracts.delete_regions(doomed)
+            alone, shared = self._sorted_out(planned)
+            listed = set(alone if regions is None else regions)
+            answered = [r for r in alone if r in listed]
+            doomed = set(answered) if delete else set()
+            freed = self.extracts.delete_regions(doomed) if doomed else 0
             conn = self._db(create=False)
             if conn is not None:
-                conn.execute("DELETE FROM owned")
+                conn.executemany("DELETE FROM owned WHERE region=?", [(r,) for r in answered])
         log.info("construction lines: %s %d extracts (%d bytes)", "deleted" if delete else "kept", len(doomed), freed)
-        return {"deleted": len(doomed), "kept": len(owned) - len(doomed), "bytes": freed}
+        return {"deleted": len(doomed), "kept": len(listed) - len(doomed), "bytes": freed}
 
     # -- an extract was filtered (also for cells) -------------------------------------------------
 

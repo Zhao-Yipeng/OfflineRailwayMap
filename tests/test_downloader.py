@@ -309,3 +309,79 @@ def test_cells_and_the_construction_overlay_share_all_of_china(home, hooks, over
         assert len([r for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]) == 1
     finally:
         core.shutdown()
+
+
+def overlay_first_then_cells(home, hooks, overpass, geofabrik, sizes):
+    """「永远显示在建线路」 is switched on first; while it downloads its first province
+    (Beijing, in view), six cells are selected: it waits for them, then goes on
+    (SPEC §7.9).  Returns once it is done (cells may still be at work) with the core,
+    the times each extract was requested and the question it asked."""
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    basemap = overpass.routes["/basemap.pmtiles"]
+    overpass.routes["/basemap.pmtiles"] = lambda r: (time.sleep(1.0), basemap(r))[1]  # cells take a while
+    got: dict[str, list[float]] = {}
+    for path in [p for p in geofabrik.routes if p.endswith(".osm.pbf")]:
+        def route(rec, serve=geofabrik.routes[path], name=path[1:-len(".osm.pbf")]):
+            if rec.method == "GET":
+                got.setdefault(name, []).append(time.time())
+                if name == "beijing":
+                    time.sleep(1.5)  # still downloading when the cells are selected
+            return serve(rec)
+        geofabrik.routes[path] = route
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    core.extracts._sizes.update(sizes)  # what HEAD requests to Geofabrik would say
+    asked: list[dict] = []
+    publish = core.construction.on_question
+    core.construction.on_question = lambda question: (asked.append(question), publish(question))
+    core.settings.last_view = (116.4, 40.5, 6.0)  # in "beijing"
+    core.settings.always_show_construction = True
+    core.construction.settings_changed()
+    assert wait_for(lambda: "beijing" in got)
+    core.cells.apply(SIX, [], (116, 39))  # they need beijing, tianjin, east1 and west2
+    assert wait_for(lambda: not core.construction._thread.is_alive(), timeout=90)
+    return core, got, asked[-1] if asked else None
+
+
+def all_cached(core) -> bool:
+    return wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=90)
+
+
+def extracts_left(core) -> list[str]:
+    return sorted(p.name.split(".")[0] for p in core.extracts.folder.glob("*.railways.sqlite"))
+
+
+def test_overlay_first_then_cells_with_provinces(home, hooks, overpass, geofabrik):
+    sizes = {"china": 3000 * 2**20, **{p: 50 * 2**20 for p in ("beijing", "tianjin", "east1", "west1", "west2", "east2")}}
+    core, got, question = overlay_first_then_cells(home, hooks, overpass, geofabrik, sizes)
+    try:
+        assert all_cached(core)
+        assert all(len(times) == 1 for times in got.values()), f"each extract downloaded once: {got}"
+        assert set(got) == {"beijing", "tianjin", "east1", "west2", "east2", "west1"}, "every province, no China"
+        done = max(core.store.cell(c)["rail_at"] for c in SIX)
+        assert min(got["east2"] + got["west1"]) > done, "the overlay's own provinces only after the cells"
+        assert sorted(question["regions"]) == ["east2", "west1"], "Beijing went to the cells too"
+        result = core.construction.decide(True, question["regions"])
+        assert result["deleted"] == 2 and result["kept"] == 0
+        assert extracts_left(core) == ["beijing", "east1", "tianjin", "west2"], "the cells' extracts stay"
+        assert core.construction.question() is None
+    finally:
+        core.shutdown()
+
+
+def test_overlay_first_then_cells_with_all_of_china(home, hooks, overpass, geofabrik):
+    sizes = {"china": 120 * 2**20, **{p: 50 * 2**20 for p in ("beijing", "tianjin", "east1", "west1", "west2", "east2")}}
+    core, got, question = overlay_first_then_cells(home, hooks, overpass, geofabrik, sizes)
+    try:
+        assert core.store.pending_cells(), "the overlay was done before the cells (they still use China)"
+        assert question["regions"] == ["beijing"], "downloaded only for the overlay: the cells read China"
+        result = core.construction.decide(True, question["regions"])  # answered at once
+        assert result["deleted"] == 1 and result["kept"] == 0
+        assert all_cached(core)
+        assert all(len(times) == 1 for times in got.values()), f"each extract downloaded once: {got}"
+        assert set(got) == {"beijing", "china"}, "after Beijing, all of China for the cells and the overlay"
+        assert core.construction._built_at("china") > 0
+        assert extracts_left(core) == ["china"]
+        assert core.construction.question() is None
+    finally:
+        core.shutdown()
