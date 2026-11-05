@@ -76,6 +76,7 @@ python -m pytest                        # 单元测试和集成测试
 
 - 端到端测试（需要 Node.js 和 Playwright）：`PYTHON=<python 路径> node tests/e2e/smoke.cjs`，以及同目录下的 `cells.cjs`、`features.cjs`、`details.cjs`、`construction.cjs`、`online.cjs`、`download.cjs`（后两个会访问真实服务器；`download.cjs` 可以用环境变量 `E2E_SETTINGS` 传入 settings.ini 内容，例如把 Overpass 指向本地替身服务器）。
 - Qt 窗口冒烟测试：`QT_QPA_PLATFORM=offscreen python tests/qt_smoke.py`。
+- 发布：推送 `v*` 标签（例如 `v0.1.0`，须与 `offline_railway_map.__version__` 一致），或在 GitHub 的 Actions 页面手动运行 build 工作流，选 main 分支并填写版本标签。构建通过后安装包自动发布到 Releases。
 - 第三方前端资源：`python tools/vendor_assets.py`（固定版本并校验哈希）；离线底图样式由 `tools/build_basemap_style.mjs` 生成。
 - 打包（Windows）：`pyinstaller packaging/OfflineRailwayMap.spec --noconfirm`，输出在 `dist\OfflineRailwayMap\`。必须使用单文件夹模式。
 - GitHub Actions（`.github/workflows/build.yml`）在 Windows 上运行测试、打包，并上传 zip。
