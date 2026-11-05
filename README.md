@@ -50,7 +50,7 @@
 
 地图数据 © OpenStreetMap contributors（ODbL）。在线底图 OpenFreeMap © OpenMapTiles。缓存区域的速度颜色、线宽和显示规则取自 [OpenRailwayMap-CartoCSS](https://github.com/OpenRailwayMap/OpenRailwayMap-CartoCSS)（GPL-3.0-or-later）。
 
-所有请求都带 `OfflineRailwayMap/<版本> (+https://github.com/Zhao-Yipeng/task1)` 这个 User-Agent，不伪装成浏览器，也不伪造 Referer。
+所有请求都带 `OfflineRailwayMap/<版本> (+https://github.com/Zhao-Yipeng/OfflineRailwayMap)` 这个 User-Agent，不伪装成浏览器，也不伪造 Referer。
 
 ## 已知限制
 
