@@ -8,6 +8,16 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
   const expect = (cond, msg) => { if (!cond) problems.push(msg); };
   // The edit bar is redrawn on the next animation frame, which can take a
   // while with software rendering: wait for the text instead of sleeping.
+  // Drag from the centre and report how far the map moved (degrees of longitude).
+  const panBy = async (cx, cy, dx) => {
+    const before = await page.evaluate(() => window.__map.getCenter().lng);
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx + dx, cy, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    return (await page.evaluate(() => window.__map.getCenter().lng)) - before;
+  };
   const barShows = async (text) => page.waitForFunction(
     (t) => document.getElementById('edit-bar').textContent.includes(t), text, { timeout: 10000 },
   ).then(() => true, () => false);
@@ -42,6 +52,24 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
     expect(Math.abs(centre.lng - 116.0) < 0.01, 'map did not pan during Shift+drag');
     if (shotEdit) await page.screenshot({ path: shotEdit });
 
+    // A plain drag pans the map in edit mode, even after a Shift press whose
+    // key-up never arrived (an input method switching 中/英 can swallow it).
+    expect(Math.abs(await panBy(cx, cy, -120)) > 0.5, 'plain drag pans the map in edit mode');
+    await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', shiftKey: true })));
+    expect(Math.abs(await panBy(cx, cy, 120)) > 0.5, 'drag still pans after a lost Shift key-up');
+    // A Shift+drag released outside the window ends cleanly; panning works afterwards.
+    await page.keyboard.down('Shift');
+    await page.mouse.move(cx + 40, cy + 40);
+    await page.mouse.down();
+    await page.mouse.move(cx + 120, cy + 90, { steps: 3 });
+    await page.keyboard.up('Shift');
+    await page.evaluate(() => window.dispatchEvent(new MouseEvent('mousemove', { clientX: 5, clientY: 5, buttons: 0 })));
+    await page.mouse.up();
+    expect(!(await page.$('.select-box')), 'no selection box left behind');
+    expect(Math.abs(await panBy(cx, cy, -120)) > 0.5, 'drag pans after a selection released outside');
+    await page.evaluate(() => window.__map.jumpTo({ center: [116.0, 39.0], zoom: 5.5 }));
+    await page.waitForTimeout(300);
+
     // Undo, then select again and apply.
     await page.click('#edit-bar button.undo');
     const cleared = await barShows('新增 0 格');
@@ -61,6 +89,7 @@ const { openPage, OFFLINE_DOWNLOADS } = require('./harness.cjs');
       return map.loaded() && map.queryRenderedFeatures({ layers: ['cells-browse-hatch'] }).length > 0;
     }, null, { timeout: 10000 }).catch(() => problems.push('queued cell is not drawn in browse mode'));
     expect(!(await page.isVisible('#edit-bar')), 'edit bar is hidden in browse mode');
+    expect(Math.abs(await panBy(cx, cy, -120)) > 0.5, 'plain drag pans the map in browse mode');
     if (shotBrowse) await page.screenshot({ path: shotBrowse });
 
     await page.click('#btn-mode');

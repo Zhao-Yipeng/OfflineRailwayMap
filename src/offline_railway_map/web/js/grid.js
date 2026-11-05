@@ -430,14 +430,10 @@ export class Cells {
     const canvas = map.getCanvasContainer();
     let drag = null;
 
+    // Shift/Alt are read from the mouse event itself, never from key events:
+    // an input method (Shift switches 中/英) or Windows (Alt) can swallow a
+    // key-up, which used to leave dragging switched off.
     const modifiers = (ev) => ev.shiftKey || ev.altKey;
-    const syncDragPan = (ev) => {
-      if (this.mode === 'edit' && modifiers(ev)) map.dragPan.disable();
-      else if (!drag) map.dragPan.enable();
-    };
-    window.addEventListener('keydown', syncDragPan);
-    window.addEventListener('keyup', syncDragPan);
-    window.addEventListener('blur', () => { if (!drag) map.dragPan.enable(); });
 
     map.on('mousemove', (e) => {
       if (this.mode !== 'edit' || map.getZoom() < MIN_SELECT_ZOOM) {
@@ -462,7 +458,12 @@ export class Cells {
     });
 
     canvas.addEventListener('mousedown', (ev) => {
-      if (this.mode !== 'edit' || ev.button !== 0 || !modifiers(ev) || map.getZoom() < MIN_SELECT_ZOOM) return;
+      const selecting = this.mode === 'edit' && ev.button === 0 && modifiers(ev) && map.getZoom() >= MIN_SELECT_ZOOM;
+      if (!selecting) {
+        if (!drag) map.dragPan.enable(); // a plain press always pans the map
+        return;
+      }
+      // Stop here, before MapLibre sees the press, so it does not pan.
       ev.preventDefault();
       ev.stopPropagation();
       map.dragPan.disable();
@@ -471,7 +472,16 @@ export class Cells {
       const box = el('div', { class: `select-box ${ev.altKey ? 'remove' : 'add'}` });
       canvas.append(box);
       drag = { start, box, add: !ev.altKey, rect };
+      const end = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        window.removeEventListener('blur', end);
+        box.remove();
+        drag = null;
+        map.dragPan.enable();
+      };
       const move = (mv) => {
+        if (mv.buttons === 0) { end(); return; } // released outside the window: no selection
         const x = mv.clientX - rect.left, y = mv.clientY - rect.top;
         Object.assign(box.style, {
           left: `${Math.min(x, start.x)}px`, top: `${Math.min(y, start.y)}px`,
@@ -479,20 +489,18 @@ export class Cells {
         });
       };
       const up = (upEv) => {
-        window.removeEventListener('mousemove', move);
-        window.removeEventListener('mouseup', up);
-        box.remove();
-        const end = { x: upEv.clientX - rect.left, y: upEv.clientY - rect.top };
+        const finish = { x: upEv.clientX - rect.left, y: upEv.clientY - rect.top };
+        const add = drag.add;
+        end();
         const a = cellAt(map.unproject([start.x, start.y]));
-        const b = cellAt(map.unproject([end.x, end.y]));
-        if (a && b && (Math.abs(end.x - start.x) > 3 || Math.abs(end.y - start.y) > 3)) {
-          this.selectRect(a.x, a.y, b.x, b.y, drag.add);
+        const b = cellAt(map.unproject([finish.x, finish.y]));
+        if (a && b && (Math.abs(finish.x - start.x) > 3 || Math.abs(finish.y - start.y) > 3)) {
+          this.selectRect(a.x, a.y, b.x, b.y, add);
         }
-        drag = null;
-        syncDragPan(upEv);
       };
       window.addEventListener('mousemove', move);
       window.addEventListener('mouseup', up);
+      window.addEventListener('blur', end);
     }, true);
 
     map.on('contextmenu', (e) => {
