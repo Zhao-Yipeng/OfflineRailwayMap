@@ -840,7 +840,7 @@ OfflineRailwayMap\                       程序文件夹（解压得到）
 ## 16. 打包、发布与许可
 
 - **发布物**：`OfflineRailwayMap-<版本号>-win64.zip`。解压后得到 `OfflineRailwayMap\` 文件夹（exe 和 `_internal\`），无需安装，解压即用。
-- 用 GitHub Actions（Windows 环境）构建，发布到 GitHub Releases。
+- 用 GitHub Actions（Windows 环境）构建，发布到 GitHub Releases：推送 `v*` 标签，或在 Actions 页面手动运行 build（选 main 分支，填写版本标签，例如 `v0.1.0`），后者会在当前 main 上建立标签和发布。标签必须与程序版本号一致。
 - **本程序的许可证**：GPL-3.0（仓库根目录的 LICENSE 文件）。
 - **THIRD_PARTY_NOTICES** 列出：
   - Qt / PySide6：LGPL-3.0（动态链接），附许可证文本和源码获取方式。

@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish this build of main as a release with this tag (e.g. v0.1.0); empty: just build"
+        required: false
+        default: ""
 
 # A newer push to the same branch replaces a build that is still running.
 concurrency:
@@ -20,8 +25,17 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:
-      contents: write  # only used to attach the zip to a release on version tags
+      contents: write  # only used to publish a release (v* tag, or started by hand with a release tag)
     steps:
+      - name: Check the release request
+        if: github.event_name == 'workflow_dispatch' && inputs.release != ''
+        shell: pwsh
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          if ("${{ github.ref }}" -ne "refs/heads/main") { throw "releases are made from main, not ${{ github.ref }}" }
+          if ($env:RELEASE -notmatch '^v\d+\.\d+\.\d+$') { throw "the release tag must look like v1.2.3, not '$env:RELEASE'" }
+
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
@@ -93,8 +107,14 @@ jobs:
       - name: Package
         id: package
         shell: pwsh
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE: ${{ inputs.release }}
         run: |
           $version = python -c "import sys; sys.path.insert(0, 'src'); import offline_railway_map as m; print(m.__version__)"
+          $tag = if ($env:REF_TYPE -eq "tag") { $env:REF_NAME } else { $env:RELEASE }
+          if ($tag -and $tag -ne "v$version") { throw "tag $tag does not match the program version $version" }
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md -Destination dist/OfflineRailwayMap
           Copy-Item licenses -Destination dist/OfflineRailwayMap/licenses -Recurse
           $zip = "OfflineRailwayMap-$version-win64.zip"
@@ -106,8 +126,13 @@ jobs:
           name: OfflineRailwayMap-win64
           path: ${{ steps.package.outputs.zip }}
 
+      # On a pushed v* tag, or when started by hand on main with a release tag
+      # (the tag is then created on this commit).
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release != '')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.package.outputs.zip }}
+          tag_name: ${{ inputs.release || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: OfflineRailwayMap ${{ inputs.release || github.ref_name }}
