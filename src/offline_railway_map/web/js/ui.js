@@ -102,24 +102,32 @@ export function trackBottomRow() {
   update();
 }
 
-/** Connectivity line in the status bar (SPEC §6.11, §13). */
+/**
+ * Connectivity in the status bar (SPEC §6.11, §13): 「在线」/「离线」 next to the
+ * scale, and below them one line per service problem or background task
+ * (e.g. 「正在加载在建线路」), so a long message is never cut off.
+ */
 export function renderStatus(status) {
   const node = $('net-status');
-  const problems = Object.values(status.services || {}).filter((s) => s.state !== 'ok');
+  const notesNode = $('status-notes');
+  const problems = Object.values(status.services || {}).filter((s) => s.state !== 'ok').map((p) => p.message);
   const notes = Object.values(status.notes || {});
+  let lines = [];
   if (status.network === 'offline') {
     node.dataset.state = 'offline';
     node.textContent = '离线';
     node.title = '无法连接网络；已缓存的区域仍可正常使用。';
-  } else if (problems.length) {
-    node.dataset.state = 'degraded';
-    node.textContent = ['在线', ...problems.map((p) => p.message), ...notes].join(' · ');
-    node.title = problems.map((p) => p.message).join('\n');
   } else {
-    node.dataset.state = 'online';
-    node.textContent = ['在线', ...notes].join(' · ');
-    node.title = notes.join('\n');
+    node.dataset.state = problems.length ? 'degraded' : 'online';
+    node.textContent = '在线';
+    node.title = problems.join('\n');
+    lines = [
+      ...problems.map((text) => el('div', { class: 'status-problem' }, text)),
+      ...notes.map((text) => el('div', {}, text)),
+    ];
   }
+  notesNode.replaceChildren(...lines);
+  notesNode.hidden = !lines.length;
 }
 
 /** Metric scale bar that follows the map (map units: 512 px tiles). */
