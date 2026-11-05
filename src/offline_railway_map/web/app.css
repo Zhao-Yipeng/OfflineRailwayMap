@@ -24,10 +24,11 @@ html, body { margin: 0; height: 100%; overflow: hidden; }
 .corner { position: absolute; display: flex; gap: 8px; }
 .top-left { top: 12px; left: 12px; flex-direction: column; align-items: flex-start; width: 320px; }
 .top-right { top: 12px; right: 12px; }
-.bottom-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; align-items: flex-end; gap: 12px; }
-.bottom-left { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: 32%; }
-.bottom-center { flex: 1 1 0; min-width: 0; display: flex; justify-content: center; }
-.bottom-right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex: 0 1 auto; min-width: 0; max-width: 40%; }
+.bottom-left { bottom: 12px; left: 12px; flex-direction: column; align-items: flex-start; }
+/* Attribution to the left of the mode button; never wider than the space the
+   「清空缓存」 button leaves free. */
+.bottom-right { bottom: 12px; right: 12px; flex-direction: row; align-items: flex-end; max-width: calc(100vw - 150px); }
+.bottom-right > button { flex-shrink: 0; white-space: nowrap; }
 
 .panel {
   background: var(--panel-bg);
@@ -61,21 +62,33 @@ button.link { background: none; border: none; box-shadow: none; padding: 0; colo
 }
 .results { width: 100%; max-height: 60vh; overflow: auto; }
 
-.status-line { display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 12px; color: var(--muted); max-width: 100%; min-width: 0; box-sizing: border-box; }
+/* Leaves room for the download panel centred above the attribution row. */
+.status-line { display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 12px; color: var(--muted); max-width: max(200px, calc(50vw - 300px)); min-width: 0; box-sizing: border-box; }
 .net-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .scale { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; }
 .scale-bar { display: inline-block; height: 6px; border: 1.5px solid #333; border-top: none; }
 .net-status[data-state="offline"] { color: var(--danger); font-weight: 600; }
 .net-status[data-state="degraded"] { color: #9a6700; font-weight: 600; }
 
-.attribution { font-size: 11px; color: var(--muted); padding: 2px 8px; max-width: 640px; text-align: right; box-sizing: border-box; }
+.attribution { font-size: 11px; color: var(--muted); padding: 2px 8px; text-align: right; box-sizing: border-box; flex: 0 1 auto; min-width: 0; align-self: center; }
 .attribution a { color: var(--muted); }
 
 .legend { position: absolute; top: 52px; right: 12px; max-height: calc(100% - 160px); overflow: auto; padding: 8px 12px; font-size: 12px; pointer-events: auto; }
-.download-panel { padding: 8px 12px; max-width: 100%; box-sizing: border-box; pointer-events: auto; }
+.download-panel {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: calc(12px + var(--bottom-row-height, 34px) + 8px);
+  width: max-content; max-width: min(560px, calc(100vw - 48px));
+  padding: 8px 12px; box-sizing: border-box; pointer-events: auto;
+}
 .edit-bar { position: absolute; left: 50%; transform: translateX(-50%); top: 12px; padding: 6px 12px; pointer-events: auto; }
 
-.edit-bar { display: flex; gap: 12px; align-items: baseline; white-space: nowrap; }
+/* Between the search box and the top-right buttons; the hint wraps below the counts when narrow. */
+.edit-bar {
+  display: flex; flex-wrap: wrap; justify-content: center; column-gap: 12px; row-gap: 2px; align-items: baseline;
+  max-width: calc(100vw - 700px); min-width: 300px; box-sizing: border-box; text-align: center;
+}
+.edit-bar > * { white-space: nowrap; }
+.edit-bar .hint { white-space: normal; }
 .edit-bar .hint { color: var(--muted); font-size: 12px; }
 .download-panel { display: flex; flex-direction: column; gap: 4px; }
 .download-panel .panel-row { display: flex; flex-wrap: wrap; column-gap: 8px; row-gap: 2px; align-items: center; }

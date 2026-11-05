@@ -13,7 +13,7 @@ import { createMap } from './map.js';
 import { addRailLayers, refreshRailLayers } from './rail.js';
 import { setupSearch } from './search.js';
 import { setupSettings } from './settings.js';
-import { $, attachScale, renderAttribution, renderStatus, showFatal, toast } from './ui.js';
+import { $, attachScale, renderAttribution, renderStatus, showFatal, toast, trackBottomRow } from './ui.js';
 
 function hasWebGL2() {
   try {
@@ -64,6 +64,7 @@ async function boot() {
   const map = createMap(info);
   window.__map = map; // handy for debugging and end-to-end tests
   renderAttribution();
+  trackBottomRow();
   renderStatus(info.status);
   attachScale(map);
   rememberView(map);

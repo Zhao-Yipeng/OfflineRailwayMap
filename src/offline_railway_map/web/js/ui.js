@@ -94,6 +94,14 @@ export function renderAttribution() {
   );
 }
 
+/** Keep the download panel just above the attribution row, however many lines the attribution takes. */
+export function trackBottomRow() {
+  const row = document.querySelector('.corner.bottom-right');
+  const update = () => document.documentElement.style.setProperty('--bottom-row-height', `${row.offsetHeight}px`);
+  new ResizeObserver(update).observe(row);
+  update();
+}
+
 /** Connectivity line in the status bar (SPEC §6.11, §13). */
 export function renderStatus(status) {
   const node = $('net-status');
