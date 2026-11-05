@@ -20,6 +20,7 @@ It includes or uses the following third-party components.
 | Python | 3.12 | PSF License | https://docs.python.org/3/license.html |
 | requests, urllib3, idna, charset-normalizer, certifi | — | Apache-2.0 / MIT / BSD-3-Clause / MIT / MPL-2.0 | |
 | shapely, numpy | 2.x | BSD-3-Clause | |
+| pyosmium (osmium) | 4.x | BSD-2-Clause | https://osmcode.org/pyosmium/ ; includes libosmium and protozero (BSL-1.0) and pybind11 (BSD-3-Clause), and ships zlib (zlib License), bzip2 (bzip2 License), expat (MIT), lz4 (BSD-2-Clause) and the Microsoft Visual C++ runtime (msvcp140, redistributable) in `_internal\osmium.libs\` |
 | mapbox-vector-tile, pyclipper, protobuf | 2.x | MIT / MIT / BSD-3-Clause | |
 | PyInstaller bootloader | 6.x | GPL-2.0 with bootloader exception | |
 
@@ -31,6 +32,7 @@ It includes or uses the following third-party components.
 | OpenRailwayMap tiles ("maxspeed" style) and search API | Tiles CC-BY-SA 2.0; terms of use: https://wiki.openstreetmap.org/wiki/OpenRailwayMap/API |
 | OpenFreeMap vector tiles (online basemap, OpenMapTiles schema) | "OpenFreeMap © OpenMapTiles Data from OpenStreetMap"; terms of service: https://openfreemap.org/tos/ |
 | Overpass API | https://wiki.openstreetmap.org/wiki/Overpass_API |
+| Geofabrik regional extracts (railway data when many cells are downloaded) | OpenStreetMap data, ODbL; https://download.geofabrik.de/technical.html |
 | Protomaps daily builds (offline basemap) | ODbL Produced Work — https://docs.protomaps.com/basemaps/downloads |
 | Nominatim | https://operations.osmfoundation.org/policies/nominatim/ |
 

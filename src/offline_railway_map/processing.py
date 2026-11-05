@@ -129,11 +129,14 @@ def build_cell(
 
     for element in elements:
         tags = element.get("tags") or {}
-        if element.get("type") == "way" and element.get("geometry"):
+        if element.get("type") == "way" and (element.get("geometry") or element.get("coords") is not None):
             cls = classify(tags)
             if cls is None:
                 continue
-            coords = [(p["lon"], p["lat"]) for p in element["geometry"] if p]
+            # Overpass: geometry [{lat, lon}, ...]; regional extracts: coords (lon, lat) array
+            coords = element.get("coords")
+            if coords is None:
+                coords = [(p["lon"], p["lat"]) for p in element["geometry"] if p]
             if len(coords) < 2:
                 continue
             clipped = _merge(_lines(shapely.clip_by_rect(LineString(coords), west, south, east, north)))

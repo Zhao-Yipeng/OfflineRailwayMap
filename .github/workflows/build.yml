@@ -36,6 +36,13 @@ jobs:
       - name: Tests
         run: python -m pytest
 
+      - name: Regional extracts on the real Geofabrik server (informational)
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          PYTHONUTF8: "1"
+        run: python tools/check_extracts.py
+
       - name: Qt window smoke test (off-screen)
         env:
           QT_QPA_PLATFORM: offscreen
@@ -74,6 +81,14 @@ jobs:
           if ($newRegistry) { throw "created in the registry: $($newRegistry -join ', ')" }
           $newTemp = Compare-Object @($beforeTemp) @(& $listTemp) | Where-Object SideIndicator -eq '=>' | ForEach-Object InputObject
           if ($newTemp) { Write-Warning "new in %TEMP% while the program ran (may be other processes): $($newTemp -join ', ')" }
+
+      - name: The build can filter regional extracts (osmium self-check)
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "self-check.txt"
+          $p = Start-Process -FilePath "dist/OfflineRailwayMap/OfflineRailwayMap.exe" -ArgumentList "--self-check", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($p.ExitCode -ne 0) { throw "self-check failed (exit code $($p.ExitCode))" }
 
       - name: Package
         id: package

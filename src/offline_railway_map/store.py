@@ -208,6 +208,14 @@ class StateStore:
         with self.write() as conn:
             conn.execute(f"UPDATE cells SET {assignments} WHERE id=?", (*fields.values(), cell_id))
 
+    def pending_cells(self) -> list[tuple[int, int]]:
+        """Cells waiting for a download or an update (SPEC §9.8 counts them)."""
+        rows = self._read(
+            "SELECT x, y FROM cells WHERE status IN ('queued', 'downloading') "
+            "OR (status = 'updating' AND update_kind IS NOT NULL)"
+        )
+        return [(x, y) for x, y in rows]
+
     def next_job(self, exclude: set[str] | frozenset[str] = frozenset()) -> dict | None:
         """The next cell to download or update, in queue order, skipping ``exclude``
         (cells other download workers are busy with)."""

@@ -7,6 +7,10 @@ its basemap or be processed.  How many requests go to each server is limited
 there (overpass.py, pmtiles.py), not here.  Processing runs one cell at a
 time, which bounds memory and CPU use.
 
+The railway data comes from regional extracts (extracts.py) when many cells
+are waiting (``EXTRACT_MIN_CELLS``) or the cell's regions are already on
+disk, otherwise from Overpass; if an extract cannot be used, from Overpass.
+
 Work happens in ``data/tmp/<cell>``; the cell only becomes "cached" once
 everything is in place, so the page never shows half a cell.
 """
@@ -20,8 +24,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import overpass, processing
+from . import extracts, overpass, processing
 from .cells import CellService
+from .extracts import EXTRACT_MIN_CELLS, ExtractStore, ExtractUnavailable
 from .net import NetStatus
 from .overpass import BudgetExhausted, OverpassClient, ServersBusy
 from .paths import Home
@@ -65,6 +70,7 @@ class Downloader:
         status: NetStatus,
         basemap: BasemapStage | None = None,
         workers: int = WORKERS,
+        extract_store: ExtractStore | None = None,
     ) -> None:
         self.home = home
         self.store = store
@@ -74,6 +80,10 @@ class Downloader:
         self.status = status
         self.basemap = basemap
         self.workers = workers
+        self.extracts = extract_store
+        self._plan: dict[str, list[str]] | None = None  # cell -> regions; None: plan again
+        self._plan_lock = threading.Lock()
+        self._plan_failed_until = 0.0
         self._wake = threading.Condition()
         self._wake_count = 0
         self._stop = threading.Event()
@@ -100,6 +110,12 @@ class Downloader:
             thread = threading.Thread(target=self._run, name=f"downloader-{index + 1}", daemon=True)
             thread.start()
             self._threads.append(thread)
+
+    def queue_changed(self) -> None:
+        """Cells were added or removed: plan the data sources again, and get going."""
+        with self._plan_lock:
+            self._plan = None
+        self.wake()
 
     def wake(self) -> None:
         with self._wake:
@@ -224,6 +240,56 @@ class Downloader:
         self.cells.add_received(cid, size)
         self._publish(cid)
 
+    def _extract_regions(self, cid: str, x: int, y: int) -> list[str] | None:
+        """The regions to read the cell's railway data from, or None for Overpass."""
+        if self.extracts is None or time.time() < self._plan_failed_until:
+            return None
+        with self._plan_lock:
+            if self._plan is None:
+                pending = self.store.pending_cells()
+                try:
+                    self._plan = self.extracts.plan(pending) if len(pending) >= EXTRACT_MIN_CELLS else {}
+                except ExtractUnavailable as exc:
+                    log.warning("no extract plan: %s", exc)
+                    self._plan_failed_until = time.time() + extracts.FAILED_PAUSE
+                    self._plan = {}
+                if self._plan:
+                    log.info("%d of %d waiting cells get their railway data from regional extracts",
+                             len(self._plan), len(pending))
+            regions = self._plan.get(cid)
+            if regions is None and self.extracts.any_fresh():
+                # Regions downloaded recently are used even for a few cells.
+                try:
+                    regions = self.extracts.plan([(x, y)]).get(cid)
+                except ExtractUnavailable:
+                    regions = None
+                if regions and not all(self.extracts.fresh(r) for r in regions):
+                    regions = None
+        if regions and all(self.extracts.usable(r) for r in regions):
+            return regions
+        return None
+
+    def _rail_data(self, cid: str, x: int, y: int, cancel: threading.Event, rail_share: float, activity, received):
+        regions = self._extract_regions(cid, x, y)
+        if regions:
+            try:
+                elements = self.extracts.cell_elements(
+                    x, y, regions, cancel, activity, received,
+                    lambda f: self._progress(cid, "rail", rail_share * 0.9 * f),
+                )
+                return elements
+            except extracts.Cancelled:
+                raise overpass.Cancelled() from None
+            except ExtractUnavailable as exc:
+                # Shown in the cell's line of the download panel; the status bar is about the network.
+                log.warning("cell %s: %s; using Overpass", cid, exc)
+                self._activity(cid, "地区数据包不可用，改用 Overpass")
+        elements = self.client.fetch_cell(
+            x, y, cancel, lambda p: self._progress(cid, "rail", rail_share * p), activity, received
+        )
+        self.status.service("overpass", "ok")
+        return elements
+
     def _process(self, job: dict, cancel: threading.Event) -> None:
         cid, x, y = job["id"], job["x"], job["y"]
         updating = job["status"] == "updating"
@@ -242,10 +308,7 @@ class Downloader:
         rail_share = RAIL_SHARE if not with_basemap else 0.35
         basemap_share = 0.0 if not with_basemap else 0.35
         try:
-            elements = self.client.fetch_cell(
-                x, y, cancel, lambda p: self._progress(cid, "rail", rail_share * p), activity, received
-            )
-            self.status.service("overpass", "ok")
+            elements = self._rail_data(cid, x, y, cancel, rail_share, activity, received)
             basemap_info: dict = {}
             if with_basemap:
                 self.cells.set_activity(cid, "下载离线底图（Protomaps）", since=time.time())

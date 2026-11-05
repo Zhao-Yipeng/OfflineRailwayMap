@@ -8,14 +8,20 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 ROOT = Path(SPECPATH).parent  # noqa: F821 - provided by PyInstaller
 SRC = ROOT / "src"
+
+# pyosmium's compiled modules import each other from C++, which PyInstaller
+# cannot see; its replication tools are not used.
+OSMIUM = collect_submodules("osmium", filter=lambda name: not name.startswith(("osmium.replication", "osmium.tools")))
 
 a = Analysis(  # noqa: F821
     [str(ROOT / "packaging" / "launcher.py")],
     pathex=[str(SRC)],
     datas=[(str(SRC / "offline_railway_map" / "web"), "offline_railway_map/web")],
-    hiddenimports=[],
+    hiddenimports=OSMIUM,
     excludes=["tkinter", "unittest", "pydoc", "test"],
     noarchive=False,
 )

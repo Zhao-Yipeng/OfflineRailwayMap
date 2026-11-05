@@ -187,3 +187,76 @@ def test_several_cells_download_at_the_same_time(home, hooks, overpass):
         assert core.cells.snapshot()["cells"][0]["activity"] is None
     finally:
         core.shutdown()
+
+
+# -- railway data from regional extracts (SPEC §9.8) -----------------------------------------
+
+
+@pytest.fixture
+def geofabrik(tmp_path):
+    import hashlib
+    import json
+
+    from test_extracts import index_json, write_pbf
+
+    server = FakeServer().start()
+    pbf = tmp_path / "served.osm.pbf"
+    write_pbf(pbf)
+    data = pbf.read_bytes()
+    server.routes["/index-v1.json"] = lambda r: (200, {}, json.dumps(index_json(server.url)).encode())
+    for name in ("china", "beijing", "tianjin", "east1", "west1", "west2", "east2"):
+        server.routes[f"/{name}.osm.pbf"] = lambda r: (200, {}, data)
+        server.routes[f"/{name}.osm.pbf.md5"] = lambda r: (200, {}, hashlib.md5(data).hexdigest().encode())
+    yield server
+    server.stop()
+
+
+SIX = ["210-96", "210-97", "211-96", "211-97", "209-96", "209-97"]
+
+
+def test_six_cells_or_more_use_regional_extracts(home, hooks, overpass, geofabrik):
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        core.cells.apply(SIX, [], (116, 39))
+        assert wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=60), [
+            core.store.cell(c)["status"] for c in SIX
+        ]
+        assert overpass.count("/api/interpreter") == 0, "no Overpass queries"
+        downloads = [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+        assert len(downloads) == len(set(downloads)) >= 1, f"each region downloaded once: {downloads}"
+        assert core.rail.tile(8, 210, 97), "the cell has railway tiles"
+        found = core.store.search_stations("北京南")
+        assert [s["name"] for s in found] == ["北京南"], "stations come along"
+    finally:
+        core.shutdown()
+
+
+def test_fewer_than_six_cells_use_overpass(home, hooks, overpass, geofabrik):
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        core.cells.apply(SIX[:5], [], (116, 39))
+        assert wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX[:5]), timeout=60)
+        assert overpass.count("/api/interpreter") == 5 * 4
+        assert geofabrik.count() == 0, "the extract index is not even read"
+    finally:
+        core.shutdown()
+
+
+def test_extract_failure_falls_back_to_overpass(home, hooks, overpass, geofabrik):
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    for path in [p for p in geofabrik.routes if p.endswith(".osm.pbf")]:
+        geofabrik.routes[path] = lambda r: (503, {}, b"")
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        core.cells.apply(SIX, [], (116, 39))
+        assert wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=90), [
+            core.store.cell(c)["status"] for c in SIX
+        ]
+        assert overpass.count("/api/interpreter") == 6 * 4, "every cell came from Overpass in the end"
+    finally:
+        core.shutdown()

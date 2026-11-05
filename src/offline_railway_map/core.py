@@ -22,6 +22,7 @@ from .coverage import CellCoverage
 from .downloader import Downloader
 from .events import EventBus, frame
 from .net import Http, NetStatus
+from .extracts import ExtractStore
 from .online_tiles import OnlineTiles
 from .overpass import OverpassClient
 from .paths import Home, web_dir
@@ -101,11 +102,13 @@ class AppCore:
         self.basemap_selector = BuildSelector(self.http.session, lambda: self.settings.basemap_source)
         self.basemap = BasemapFetcher(self.http.session, self.basemap_selector, lambda: self.settings.basemap_maxzoom)
         self.overpass = OverpassClient(self.http.session, lambda: list(self.settings.overpass_endpoints), self.store)
+        self.extracts = ExtractStore(home, self.http.session)
         self.downloader = Downloader(
-            home, self.store, self.cells, self.overpass, self.rail, self.status, basemap=self.basemap
+            home, self.store, self.cells, self.overpass, self.rail, self.status, basemap=self.basemap,
+            extract_store=self.extracts,
         )
         self.downloader.on_install(lambda cid, cell_dir: install_ancestors(cell_dir, cid, self.lowzoom))
-        self.cells.on_queue(self.downloader.wake)
+        self.cells.on_queue(self.downloader.queue_changed)
         self.cells.on_delete(self._cells_deleted)
         self.rail.on_corrupt = lambda cid: self.cells.mark_failed(cid, "数据已损坏，请重新下载")
         self.search = SearchService(self.http.session, self.store, self.status)
@@ -122,6 +125,7 @@ class AppCore:
 
     def start(self) -> str:
         """Start serving; return the URL of the page."""
+        self.extracts.remove_stale()
         self.cells.start()
         self.rail.load_versions(self.store.cells())
         self.server.start()
@@ -141,6 +145,7 @@ class AppCore:
             try:
                 # While the gate is closed nothing opens or creates a file in
                 # data\, so no file is locked or recreated during the deletion.
+                self.extracts.stop()  # downloads and filtering of regional extracts
                 with self.home.blocked_while_clearing():
                     # Online tiles go to memory from now on, so reloading the map
                     # after clearing does not recreate data\ (SPEC §6.6).
@@ -157,6 +162,8 @@ class AppCore:
                         setattr(self.settings, field.name, getattr(defaults, field.name))
                     self._estimates.clear()
                     self.overpass.forget_all()
+                    self.extracts.forget()
+                    self.downloader.queue_changed()
                     self.cells.reset()
                 self.events.publish("settings", self.settings.public_dict())
             finally:
@@ -200,6 +207,7 @@ class AppCore:
 
     def shutdown(self) -> None:
         self.downloader.stop()
+        self.extracts.stop(timeout=5.0)
         self.events.close()
         self.server.stop()
         self.online_server.stop()
