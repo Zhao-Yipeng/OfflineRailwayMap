@@ -613,3 +613,34 @@ def test_a_download_started_for_the_overlay_is_its_own_even_if_it_stopped_waitin
     waiting.join(5)
     assert wait_until(lambda: lines.extracts.fresh("beijing"))
     assert lines.question()["regions"] == ["beijing"]
+
+
+def test_a_package_arriving_while_switched_off_updates_the_saved_lines(home, geofabrik):
+    """Switched off, the saved lines still follow new packages (not drawn meanwhile), so
+    they are up to date as soon as the setting is on again."""
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch)
+    lines.settings_changed()
+    wait_for_question(lines)
+    lines.decide(delete=True)
+    switch.on = False
+    lines.settings_changed()
+    wait_for_question(lines)
+    before = lines._built_at("tianjin")
+    for_cells(lines, ["tianjin"], cell=(210, 97))  # cells bring a new package while it is off
+    assert wait_until(lambda: lines._built_at("tianjin") > before), "read at once, although off"
+    assert lines.tile(*tile_at(6)) == b"", "not drawn while off"
+    switch.on = True
+    assert 100 in ids(lines.tile(*tile_at(6))), "on again: shown at once"
+
+
+def test_a_package_arriving_before_the_setting_was_ever_on_is_used_when_it_is(home, geofabrik):
+    lines_off = Switch(False)
+    lines = make(home, geofabrik, lines_off)
+    for_cells(lines, ["china"])  # never switched on: nothing saved, nothing read
+    time.sleep(0.3)
+    assert lines._built_at("china") == 0
+    lines_off.on = True
+    lines.settings_changed()
+    assert wait_for_question(lines) is None
+    assert lines._built_at("china") > 0 and geofabrik.downloaded() == {"china"}, "the package on hand, no download"
