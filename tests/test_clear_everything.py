@@ -109,9 +109,20 @@ class Run:
             assert self.get(f"/tiles/basemap/{z}/{tx}/{ty}.mvt?v=1") in (200, 204)
             assert self.get(f"/tiles/ofm/{min(z, 14)}/{tx + 1}/{ty}.pbf?v=1", online=True) in (200, 204)
             assert self.get(f"/tiles/orm/{z}/{tx + 1}/{ty}.png?v=1", online=True) == 200
+            assert self.get(f"/tiles/construction/{z}/{tx + 1}/{ty}.mvt?v=1") in (200, 204)
         assert self.get("/api/cells") == 200
         assert self.get("/api/search?q=%E7%AB%99") == 200  # 站
         assert self.get("/api/details?cell=210-97&way=1") in (200, 404)
+
+    def wait_for_construction_lines(self) -> None:
+        """「永远显示在建线路」: the overlay's data is fetched and kept in data\\cache."""
+        end = time.time() + 30
+        while time.time() < end:
+            if self.get("/tiles/construction/6/52/24.mvt?v=1") == 200:  # z6: not masked by cached cells
+                assert (self.home.cache_dir / "construction.sqlite").exists()
+                return
+            time.sleep(0.1)
+        raise AssertionError("no construction lines")
 
     def download(self, cid: str) -> None:
         status, _ = self.client.post_json("/api/cells/apply", {"add": [cid], "remove": []})
@@ -147,9 +158,10 @@ def test_clearing_after_long_use_leaves_only_the_program(tmp_path, servers, monk
     # Run 2: browse, change a setting, download a cell, look at it.
     run = Run(root, servers)
     run.browse()
-    assert run.client.post_json("/api/settings", {"showCachedOutline": False})[0] == 200
+    assert run.client.post_json("/api/settings", {"showCachedOutline": False, "alwaysShowConstruction": True})[0] == 200
     run.download("210-97")
     run.browse()
+    run.wait_for_construction_lines()
     assert run.client.post_json("/api/view", {"lon": 116.4, "lat": 39.9, "zoom": 9})[0] == 200
     run.stop()
     assert (root / "data").is_dir()

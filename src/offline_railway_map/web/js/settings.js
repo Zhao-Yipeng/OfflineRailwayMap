@@ -24,6 +24,7 @@ export function setupSettings(onSaved) {
     const limit = el('input', { type: 'number', id: 'set-limit', min: 256, max: 20480, step: 256 });
     limit.value = String(s.onlineCacheLimitMb);
     const outline = el('input', { type: 'checkbox', id: 'set-outline', checked: s.showCachedOutline });
+    const construction = el('input', { type: 'checkbox', id: 'set-construction', checked: s.alwaysShowConstruction });
     const about = data.about;
     const body = el('div', { class: 'settings' },
       el('label', {}, '离线底图最大级别', zoom, el('small', {}, '只影响之后下载或更新底图的方格')),
@@ -33,6 +34,9 @@ export function setupSettings(onSaved) {
         el('label', { class: 'inline' }, sourceCustom, '自定义 PMTiles 地址'), sourceUrl),
       el('label', {}, '在线瓦片硬盘缓存上限（MB）', limit),
       el('label', { class: 'inline' }, outline, '浏览模式下显示已缓存方格的边框'),
+      el('div', { class: 'option' },
+        el('label', { class: 'inline' }, construction, '永远显示在建线路'),
+        el('small', {}, '未缓存的区域也在所有缩放级别显示在建线路，样式与已建成线路相同（数据按需从 Overpass 获取）')),
       el('details', { class: 'about' }, el('summary', {}, `关于 ${about.app} ${about.version}`),
         el('p', {}, `许可证：${about.license}`),
         el('p', {}, about.disclaimer),
@@ -50,6 +54,7 @@ export function setupSettings(onSaved) {
         basemapSource: sourceCustom.checked ? sourceUrl.value.trim() : 'auto',
         onlineCacheLimitMb: Number(limit.value),
         showCachedOutline: outline.checked,
+        alwaysShowConstruction: construction.checked,
       };
       try {
         const saved = await api.post('/api/settings', payload);

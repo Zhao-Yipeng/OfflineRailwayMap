@@ -1,12 +1,12 @@
 // Layer stack (SPEC §7.1), bottom to top:
 //   background, online basemap (OpenFreeMap), mask over cached cells,
-//   offline basemap, cached railways, online ORM tiles, cached labels,
-//   cell overlay.
+//   offline basemap, lines under construction in uncached areas (setting),
+//   cached railways, online ORM tiles, cached labels, cell overlay.
 // Each group is closed by an invisible marker layer; a group's layers are
 // inserted right before its marker, so modules can add layers in any order.
 import { onlineUrl } from './api.js';
 
-const GROUPS = ['online', 'mask', 'basemap', 'rail', 'orm', 'labels', 'grid'];
+const GROUPS = ['online', 'mask', 'basemap', 'construction', 'rail', 'orm', 'labels', 'grid'];
 
 let tileVersion = 0;
 

@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from . import APP_NAME, __version__, cleanup, logs
 from .basemap import BasemapFetcher, BasemapTiles, BuildSelector, LowzoomStore, install_ancestors
 from .cells import CellService
+from .construction import ConstructionLines
 from .coverage import CellCoverage
 from .downloader import Downloader
 from .events import EventBus, frame
@@ -103,6 +104,10 @@ class AppCore:
         self.basemap = BasemapFetcher(self.http.session, self.basemap_selector, lambda: self.settings.basemap_maxzoom)
         self.overpass = OverpassClient(self.http.session, lambda: list(self.settings.overpass_endpoints), self.store)
         self.extracts = ExtractStore(home, self.http.session)
+        self.construction = ConstructionLines(
+            home, self.overpass, self.coverage, lambda: self.settings.always_show_construction, self.status,
+            on_change=lambda version: self.events.publish("construction", {"version": version}),
+        )
         self.downloader = Downloader(
             home, self.store, self.cells, self.overpass, self.rail, self.status, basemap=self.basemap,
             extract_store=self.extracts,
@@ -146,6 +151,7 @@ class AppCore:
                 # While the gate is closed nothing opens or creates a file in
                 # data\, so no file is locked or recreated during the deletion.
                 self.extracts.stop()  # downloads and filtering of regional extracts
+                self.construction.stop(timeout=1.0)  # a query still running is never saved
                 with self.home.blocked_while_clearing():
                     # Online tiles go to memory from now on, so reloading the map
                     # after clearing does not recreate data\ (SPEC §6.6).
@@ -154,6 +160,7 @@ class AppCore:
                     self.rail.close_all()
                     self.rail.forget(list(self.rail._versions))
                     self.lowzoom.close()
+                    self.construction.close()
                     self.store.close()
                     logs.detach_file()
                     failed = cleanup.remove_data(self.home)
@@ -163,6 +170,7 @@ class AppCore:
                     self._estimates.clear()
                     self.overpass.forget_all()
                     self.extracts.forget()
+                    self.construction.forget()
                     self.downloader.queue_changed()
                     self.cells.reset()
                 self.events.publish("settings", self.settings.public_dict())
@@ -208,6 +216,8 @@ class AppCore:
     def shutdown(self) -> None:
         self.downloader.stop()
         self.extracts.stop(timeout=5.0)
+        self.construction.stop(timeout=2.0)
+        self.construction.close()
         self.events.close()
         self.server.stop()
         self.online_server.stop()
@@ -242,6 +252,7 @@ class AppCore:
         add("POST", "/api/settings", self._api_settings_save)
         add("GET", r"/tiles/rail/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_rail)
         add("GET", r"/tiles/basemap/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_basemap)
+        add("GET", r"/tiles/construction/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_construction)
         self.online_router.add(
             "GET", r"/tiles/(?P<source>orm)/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.png", self._tile_online
         )
@@ -392,6 +403,7 @@ class AppCore:
         except (ValueError, TypeError) as exc:
             return error_response(400, str(exc))
         self.settings.save(self.home)
+        self.construction.settings_changed()
         self.events.publish("settings", self.settings.public_dict())
         return json_response({"settings": self.settings.public_dict()})
 
@@ -409,6 +421,7 @@ class AppCore:
                 ["Noto Sans 字体", "SIL OFL 1.1"],
                 ["OpenRailwayMap-CartoCSS（速度颜色、线宽、显示规则）", "GPL-3.0-or-later"],
                 ["shapely", "BSD-3-Clause"],
+                ["pyosmium（osmium）", "BSD-2-Clause"],
                 ["requests", "Apache-2.0"],
                 ["mapbox-vector-tile", "MIT"],
                 ["地图数据 © OpenStreetMap contributors", "ODbL"],
@@ -418,6 +431,14 @@ class AppCore:
     def _tile_rail(self, req: Request) -> Response:
         p = req.params
         data = self.rail.tile(int(p["z"]), int(p["x"]), int(p["y"]))
+        return Response(200 if data else 204, data, "application/x-protobuf", PNG_HEADERS)
+
+    def _tile_construction(self, req: Request) -> Response:
+        p = req.params
+        z = int(p["z"])
+        if not 2 <= z <= 14:
+            return Response(204, b"", "application/x-protobuf", PNG_HEADERS)
+        data = self.construction.tile(z, int(p["x"]), int(p["y"]))
         return Response(200 if data else 204, data, "application/x-protobuf", PNG_HEADERS)
 
     def _tile_basemap(self, req: Request) -> Response:

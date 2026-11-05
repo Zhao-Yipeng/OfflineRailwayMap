@@ -106,18 +106,19 @@ export function trackBottomRow() {
 export function renderStatus(status) {
   const node = $('net-status');
   const problems = Object.values(status.services || {}).filter((s) => s.state !== 'ok');
+  const notes = Object.values(status.notes || {});
   if (status.network === 'offline') {
     node.dataset.state = 'offline';
     node.textContent = '离线';
     node.title = '无法连接网络；已缓存的区域仍可正常使用。';
   } else if (problems.length) {
     node.dataset.state = 'degraded';
-    node.textContent = `在线 · ${problems.map((p) => p.message).join(' · ')}`;
+    node.textContent = ['在线', ...problems.map((p) => p.message), ...notes].join(' · ');
     node.title = problems.map((p) => p.message).join('\n');
   } else {
     node.dataset.state = 'online';
-    node.textContent = '在线';
-    node.title = '';
+    node.textContent = ['在线', ...notes].join(' · ');
+    node.title = notes.join('\n');
   }
 }
 

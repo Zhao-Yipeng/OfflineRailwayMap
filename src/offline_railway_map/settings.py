@@ -41,6 +41,7 @@ class Settings:
     basemap_source: str = "auto"  # "auto" or the URL of a PMTiles archive
     online_cache_limit_mb: int = 2048
     show_cached_outline: bool = True
+    always_show_construction: bool = False  # 「永远显示在建线路」 (SPEC §7.9)
     window_geometry: str = ""  # base64 of QMainWindow.saveGeometry()
     last_view: tuple[float, float, float] | None = None  # lon, lat, zoom
 
@@ -73,6 +74,7 @@ class Settings:
                     "basemap_source": general.get("basemap_source", settings.basemap_source),
                     "online_cache_limit_mb": general.get("online_cache_limit_mb", settings.online_cache_limit_mb),
                     "show_cached_outline": str(ui.get("show_cached_outline", "true")).lower() == "true",
+                    "always_show_construction": str(ui.get("always_show_construction", "false")).lower() == "true",
                 }
             )
         except ValueError as exc:
@@ -98,7 +100,10 @@ class Settings:
             "basemap_source": self.basemap_source,
             "online_cache_limit_mb": str(self.online_cache_limit_mb),
         }
-        ui = {"show_cached_outline": "true" if self.show_cached_outline else "false"}
+        ui = {
+            "show_cached_outline": "true" if self.show_cached_outline else "false",
+            "always_show_construction": "true" if self.always_show_construction else "false",
+        }
         if self.window_geometry:
             ui["window_geometry"] = self.window_geometry
         if self.last_view:
@@ -127,6 +132,7 @@ class Settings:
             "basemapSource": self.basemap_source,
             "onlineCacheLimitMb": self.online_cache_limit_mb,
             "showCachedOutline": self.show_cached_outline,
+            "alwaysShowConstruction": self.always_show_construction,
         }
 
     def apply_user_changes(self, values: dict) -> None:
@@ -155,11 +161,13 @@ class Settings:
         if not low <= limit <= high:
             raise ValueError(f"online cache limit must be between {low} and {high} MB")
         outline = pick("show_cached_outline", "showCachedOutline")
+        construction = pick("always_show_construction", "alwaysShowConstruction")
         self.basemap_maxzoom = zoom
         self.overpass_endpoints = endpoints
         self.basemap_source = source
         self.online_cache_limit_mb = limit
         self.show_cached_outline = bool(outline)
+        self.always_show_construction = bool(construction)
 
     def initial_view(self) -> tuple[float, float, float]:
         return self.last_view or DEFAULT_VIEW

@@ -112,6 +112,21 @@ class CellResult:
     size: int
 
 
+def line_props(tags: dict, cls) -> dict:
+    """The properties a line carries in the vector tiles (see web/js/rail.js)."""
+    speed = color_speed(tags)
+    props = {
+        "st": STATE_CODES[cls.state],
+        "w": cls.width,
+        "lc": cls.low_class,
+        "sk": (_layer(tags) + 10) * 10_000_000 + cls.rank * 1000 + (speed + 1 if speed is not None else 0),
+        "lp": cls.rank * 1000 + (speed or 0),
+    }
+    if speed is not None:
+        props["sp"] = speed
+    return props
+
+
 def build_cell(
     elements: Iterable[dict],
     cx: int,
@@ -143,16 +158,7 @@ def build_cell(
             if clipped is None:
                 continue
             geom = shapely.transform(clipped, to_mercator)
-            speed = color_speed(tags)
-            props = {
-                "st": STATE_CODES[cls.state],
-                "w": cls.width,
-                "lc": cls.low_class,
-                "sk": (_layer(tags) + 10) * 10_000_000 + cls.rank * 1000 + (speed + 1 if speed is not None else 0),
-                "lp": cls.rank * 1000 + (speed or 0),
-            }
-            if speed is not None:
-                props["sp"] = speed
+            props = line_props(tags, cls)
             lines.append(_Line(element["id"], geom, props, cls.minzoom, cls.labelzoom, speed_label(tags)))
             ways[element["id"]] = json.dumps(tags, ensure_ascii=False, separators=(",", ":"))
             continue

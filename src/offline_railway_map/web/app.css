@@ -143,6 +143,8 @@ button.result:hover { background: #f3f4f6; }
 .settings label { display: flex; flex-direction: column; gap: 4px; }
 .settings label.inline { flex-direction: row; align-items: center; gap: 6px; }
 .settings small { color: var(--muted); }
+.settings .option { display: flex; flex-direction: column; gap: 2px; }
+.settings .option small { padding-left: 22px; }
 .settings textarea, .settings input[type=url], .settings input[type=number], .settings select { font: inherit; padding: 4px 6px; }
 .settings fieldset { border: 1px solid var(--panel-border); border-radius: var(--radius); display: flex; flex-direction: column; gap: 6px; }
 .settings .about table { font-size: 12px; }

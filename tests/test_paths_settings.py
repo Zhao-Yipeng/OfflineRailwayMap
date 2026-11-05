@@ -28,18 +28,21 @@ def test_settings_defaults_without_file(home: Home):
     assert settings.basemap_maxzoom == 14
     assert settings.overpass_endpoints == list(DEFAULT_OVERPASS_ENDPOINTS)
     assert settings.initial_view() == (105.0, 35.0, 4.0)
+    assert settings.always_show_construction is False, "「永远显示在建线路」 is off until switched on"
     assert not home.data_exists()
 
 
 def test_settings_roundtrip(home: Home):
     settings = Settings()
-    settings.apply_user_changes({"basemapMaxzoom": 13, "showCachedOutline": False})
+    settings.apply_user_changes({"basemapMaxzoom": 13, "showCachedOutline": False, "alwaysShowConstruction": True})
     settings.last_view = (116.4, 39.9, 9.5)
     settings.window_geometry = "AAAA"
     settings.save(home)
     loaded = Settings.load(home)
     assert loaded.basemap_maxzoom == 13
     assert loaded.show_cached_outline is False
+    assert loaded.always_show_construction is True
+    assert loaded.public_dict()["alwaysShowConstruction"] is True
     assert loaded.last_view == pytest.approx((116.4, 39.9, 9.5))
     assert loaded.window_geometry == "AAAA"
 

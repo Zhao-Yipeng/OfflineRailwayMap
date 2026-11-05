@@ -70,10 +70,26 @@ class NetStatus:
         self._network = "online"
         self._failures = 0
         self._services: dict[str, dict] = {}
+        self._notes: dict[str, str] = {}
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"network": self._network, "services": {k: dict(v) for k, v in self._services.items()}}
+            return {
+                "network": self._network,
+                "services": {k: dict(v) for k, v in self._services.items()},
+                "notes": dict(self._notes),
+            }
+
+    def note(self, name: str, text: str | None) -> None:
+        """Something going on in the background, shown after 「在线」 (None removes it)."""
+        with self._lock:
+            changed = self._notes.get(name) != text
+            if text:
+                self._notes[name] = text
+            else:
+                self._notes.pop(name, None)
+        if changed:
+            self._publish()
 
     def _publish(self) -> None:
         self._events.publish("status", self.snapshot())

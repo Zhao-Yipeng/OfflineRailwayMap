@@ -10,7 +10,9 @@ import { setupDetails } from './details.js';
 import { addGroupMarkers, addOnlineLayers, refreshOnlineLayers } from './layers.js';
 import { setupLegend } from './legend.js';
 import { createMap } from './map.js';
-import { addRailLayers, refreshRailLayers } from './rail.js';
+import {
+  addConstructionLayers, addRailLayers, refreshConstruction, refreshRailLayers, setConstructionVisible,
+} from './rail.js';
 import { setupSearch } from './search.js';
 import { setupSettings } from './settings.js';
 import { $, attachScale, renderAttribution, renderStatus, showFatal, toast, trackBottomRow } from './ui.js';
@@ -79,6 +81,7 @@ async function boot() {
   addBasemap(map, snapshot.basemapMaxzoom);
   addOnlineLayers(map, onlineBasemapLayers());
   addRailLayers(map);
+  addConstructionLayers(map, info.settings.alwaysShowConstruction);
 
   const cells = new Cells(map, {
     showOutline: info.settings.showCachedOutline,
@@ -99,6 +102,7 @@ async function boot() {
   const applySettings = (s) => {
     cells.showOutline = s.showCachedOutline;
     cells.refresh();
+    setConstructionVisible(map, s.alwaysShowConstruction);
   };
   setupSettings(applySettings);
   setupClearButton(cells);
@@ -116,6 +120,7 @@ async function boot() {
     },
     cell: (row) => { cells.updateCell(row); renderDownloadPanel(cells); },
     settings: applySettings,
+    construction: ({ version }) => refreshConstruction(map, version),
     tiles: ({ version }) => {
       refreshOnlineLayers(map, version);
       refreshRailLayers(map, version);

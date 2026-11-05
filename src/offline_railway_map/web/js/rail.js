@@ -36,22 +36,29 @@ function lineWidth(extra = 0) {
 }
 
 let version = 1;
+let constructionVersion = 0;
 const tileUrl = () => [url(`/tiles/rail/{z}/{x}/{y}.mvt?v=${version}`)];
+const constructionUrl = () => [url(`/tiles/construction/{z}/{x}/{y}.mvt?v=${version}-${constructionVersion}`)];
+const lineLayout = { 'line-join': 'round', 'line-cap': 'round', 'line-sort-key': ['get', 'sk'] };
+
+/** White casing, then the line coloured by speed: the same for cached lines and the overlay. */
+function addLines(map, source, group, prefix, filter, extraLayout = {}) {
+  addToGroup(map, group, {
+    id: `${prefix}-casing`, type: 'line', source, 'source-layer': 'rail',
+    layout: { ...lineLayout, ...extraLayout },
+    paint: { 'line-color': '#ffffff', 'line-width': lineWidth(2) },
+  });
+  addToGroup(map, group, {
+    id: `${prefix}-lines`, type: 'line', source, 'source-layer': 'rail',
+    filter,
+    layout: { ...lineLayout, ...extraLayout },
+    paint: { 'line-color': speedColor(), 'line-width': lineWidth() },
+  });
+}
 
 export function addRailLayers(map) {
   map.addSource('rail', { type: 'vector', tiles: tileUrl(), minzoom: 2, maxzoom: 14 });
-  const lineLayout = { 'line-join': 'round', 'line-cap': 'round', 'line-sort-key': ['get', 'sk'] };
-  addToGroup(map, 'rail', {
-    id: 'rail-casing', type: 'line', source: 'rail', 'source-layer': 'rail',
-    layout: lineLayout,
-    paint: { 'line-color': '#ffffff', 'line-width': lineWidth(2) },
-  });
-  addToGroup(map, 'rail', {
-    id: 'rail-lines', type: 'line', source: 'rail', 'source-layer': 'rail',
-    filter: ['!=', ['get', 'st'], 'p'],
-    layout: lineLayout,
-    paint: { 'line-color': speedColor(), 'line-width': lineWidth() },
-  });
+  addLines(map, 'rail', 'rail', 'rail', ['!=', ['get', 'st'], 'p']);
   addToGroup(map, 'rail', {
     id: 'rail-proposed', type: 'line', source: 'rail', 'source-layer': 'rail',
     filter: ['==', ['get', 'st'], 'p'],
@@ -104,4 +111,30 @@ export function refreshRailLayers(map, newVersion) {
   version = newVersion;
   const source = map.getSource('rail');
   if (source) source.setTiles(tileUrl());
+  const construction = map.getSource('construction');
+  if (construction) construction.setTiles(constructionUrl());
+}
+
+// Lines under construction in uncached areas, at every zoom (setting 「永远显示在建线路」,
+// SPEC §7.9).  Drawn like cached lines, below them and below the ORM tiles; the
+// tiles are empty inside cached cells.  Hidden layers request no tiles.
+const CONSTRUCTION_LAYERS = ['construction-casing', 'construction-lines'];
+
+export function addConstructionLayers(map, visible) {
+  map.addSource('construction', { type: 'vector', tiles: constructionUrl(), minzoom: 2, maxzoom: 14 });
+  addLines(map, 'construction', 'construction', 'construction', ['==', ['get', 'st'], 'c'],
+    { visibility: visible ? 'visible' : 'none' });
+}
+
+export function setConstructionVisible(map, visible) {
+  for (const id of CONSTRUCTION_LAYERS) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
+  }
+}
+
+/** New lines under construction arrived: reload the overlay's tiles. */
+export function refreshConstruction(map, newVersion) {
+  constructionVersion = newVersion;
+  const source = map.getSource('construction');
+  if (source) source.setTiles(constructionUrl());
 }

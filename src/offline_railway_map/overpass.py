@@ -129,6 +129,10 @@ class ServersBusy(Exception):
     """Every reachable server kept answering "busy"; try again later."""
 
 
+class AreaTooBig(Exception):
+    """The servers would not answer for this area: ask for its parts instead."""
+
+
 class _NeedsSplit(Exception):
     pass
 
@@ -234,6 +238,22 @@ class OverpassClient:
         self.forget_cell(x, y)
         return list(found.values())
 
+    def query_area(
+        self,
+        query: str,
+        cancel: threading.Event,
+        *,
+        can_split: bool,
+        timeout: int,
+        activity: Activity = _no_activity,
+    ) -> list[dict]:
+        """Run ``query`` (one area) with the same servers, slots and retries as the
+        cell downloads; raises AreaTooBig when the area should be asked for in parts."""
+        try:
+            return self._query_area(None, cancel, can_split, timeout, activity, query=query)
+        except _NeedsSplit as exc:
+            raise AreaTooBig(str(exc)) from None
+
     def lines_near(self, lon: float, lat: float, radius: float) -> list[dict]:
         """Tags of railway lines within ``radius`` metres of a point (click details)."""
         query = (
@@ -282,8 +302,9 @@ class OverpassClient:
         timeout: int = 180,
         activity: Activity = _no_activity,
         received: Callable[[int], None] = lambda n: None,
+        query: str | None = None,
     ) -> list[dict]:
-        query = build_query(bounds, timeout)
+        query = query or build_query(bounds, timeout)
         read_timeout = timeout + READ_MARGIN
         for attempt in range(len(self.busy_backoff) + 1):
             tried = connection_failures = heavy_failures = busy = 0
