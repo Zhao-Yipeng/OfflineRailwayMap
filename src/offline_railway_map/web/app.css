@@ -68,9 +68,12 @@ button.link { background: none; border: none; box-shadow: none; padding: 0; colo
 .results { width: 100%; max-height: 60vh; overflow: auto; }
 
 /* Leaves room for the download panel centred above the attribution row. */
-.status-line { display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; padding: 3px 8px; font-size: 12px; color: var(--muted); max-width: max(200px, calc(50vw - 300px)); min-width: 0; box-sizing: border-box; }
-.net-status { min-width: 0; white-space: nowrap; }
-.status-notes { flex-basis: 100%; line-height: 1.5; }
+/* As wide as its longest line (no empty space on the right), at most the room
+   left beside the download panel; longer lines wrap. */
+.status-line { width: fit-content; padding: 3px 8px; font-size: 12px; color: var(--muted); max-width: max(200px, calc(50vw - 300px)); box-sizing: border-box; }
+.status-main { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.net-status { white-space: nowrap; }
+.status-notes { line-height: 1.5; }
 .status-notes[hidden] { display: none; }
 .status-notes .status-problem { color: #9a6700; font-weight: 600; }
 .scale { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; }
