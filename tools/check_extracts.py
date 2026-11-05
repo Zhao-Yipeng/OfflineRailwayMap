@@ -46,6 +46,32 @@ def cells_in(west: float, south: float, east: float, north: float) -> list[tuple
     return [(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)]
 
 
+def check_area(index, name: str, bbox, size_of) -> None:
+    cells = cells_in(*bbox)
+    started = time.time()
+    chosen = collections.Counter()
+    for x, y in cells:
+        for region in index.most_specific(x, y):
+            chosen[region.id] += 1
+    # Regions picked next to their own parts (a parent for a border sliver)
+    nested = sorted(
+        rid for rid in chosen
+        if any(index.regions[k].parent == rid for k in chosen) and rid in index.regions
+    )
+    spent = time.time() - started
+    print(f"\n== {name}: {len(cells)} cells, choice {spent:.1f} s")
+    print("  per cell:", ", ".join(f"{rid}×{n}" for rid, n in chosen.most_common(14)))
+    if nested:
+        print("  !! parents next to their parts:", ", ".join(nested))
+    if len(cells) <= 200:
+        result = plan(index, cells, size_of)
+        used = collections.Counter(r for regions in result.values() for r in regions)
+        total = sum(size_of(index.regions[r]) or 0 for r in used)
+        print(f"  plan: {len(result)} of {len(cells)} cells from extracts, {total / 1e6:.0f} MB:",
+              ", ".join(f"{r} ({(size_of(index.regions[r]) or 0) / 1e6:.0f} MB, {n} cells)"
+                        for r, n in used.most_common()))
+
+
 def main(index_url: str = INDEX_URL) -> int:
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
@@ -64,30 +90,13 @@ def main(index_url: str = INDEX_URL) -> int:
                 sizes[region.id] = store.size_of(region)
             return sizes[region.id]
 
+        problems = 0
         for name, bbox in AREAS.items():
-            cells = cells_in(*bbox)
-            started = time.time()
-            chosen = collections.Counter()
-            for x, y in cells:
-                for region in index.most_specific(x, y):
-                    chosen[region.id] += 1
-            # Regions picked next to their own parts (a parent for a border sliver)
-            nested = sorted(
-                rid for rid in chosen
-                if any(index.regions[k].parent == rid for k in chosen) and rid in index.regions
-            )
-            spent = time.time() - started
-            print(f"\n== {name}: {len(cells)} cells, choice {spent:.1f} s")
-            print("  per cell:", ", ".join(f"{rid}×{n}" for rid, n in chosen.most_common(12)))
-            if nested:
-                print("  !! parents next to their parts:", ", ".join(nested))
-            if len(cells) <= 200:
-                result = plan(index, cells, size_of)
-                used = collections.Counter(r for regions in result.values() for r in regions)
-                total = sum(size_of(index.regions[r]) or 0 for r in used)
-                print(f"  plan: {len(result)} of {len(cells)} cells from extracts, {total / 1e6:.0f} MB:",
-                      ", ".join(f"{r} ({(size_of(index.regions[r]) or 0) / 1e6:.0f} MB, {n} cells)"
-                                for r, n in used.most_common()))
+            try:
+                check_area(index, name, bbox, size_of)
+            except Exception as exc:  # noqa: BLE001 - report and go on with the next area
+                problems += 1
+                print(f"\n!! {name}: {type(exc).__name__}: {exc}")
 
         # A real download, filtered and built like the program does it.
         x, y = (int(v) for v in lonlat_to_tile(9.52, 47.17, CELL_ZOOM))  # Schaan, Liechtenstein
@@ -108,7 +117,7 @@ def main(index_url: str = INDEX_URL) -> int:
         print(f"built: {result.lines} lines, {result.tiles} tiles; stations e.g. {names}")
         if not ways or not result.tiles:
             return 1
-    return 0
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

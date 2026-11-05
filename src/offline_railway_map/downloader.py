@@ -249,7 +249,7 @@ class Downloader:
                 pending = self.store.pending_cells()
                 try:
                     self._plan = self.extracts.plan(pending) if len(pending) >= EXTRACT_MIN_CELLS else {}
-                except ExtractUnavailable as exc:
+                except Exception as exc:  # noqa: BLE001 - without a plan every cell uses Overpass
                     log.warning("no extract plan: %s", exc)
                     self._plan_failed_until = time.time() + extracts.FAILED_PAUSE
                     self._plan = {}
@@ -261,7 +261,7 @@ class Downloader:
                 # Regions downloaded recently are used even for a few cells.
                 try:
                     regions = self.extracts.plan([(x, y)]).get(cid)
-                except ExtractUnavailable:
+                except Exception:  # noqa: BLE001 - Overpass then
                     regions = None
                 if regions and not all(self.extracts.fresh(r) for r in regions):
                     regions = None

@@ -40,6 +40,7 @@ from typing import Callable
 import numpy as np
 import requests
 import shapely
+import shapely.errors
 from shapely.geometry import box, shape
 
 from .grid import CELL_ZOOM, cell_bounds, cell_id, lonlat_to_tile
@@ -97,8 +98,10 @@ class RegionIndex:
             if not props.get("id") or not pbf or not feature.get("geometry"):
                 continue
             try:
-                geometry = shape(feature["geometry"])
-            except (ValueError, TypeError, KeyError):
+                geometry = _polygonal(shape(feature["geometry"]))
+            except (ValueError, TypeError, KeyError, shapely.errors.GEOSException):
+                continue
+            if geometry is None:
                 continue
             region = Region(props["id"], props.get("parent"), props.get("name") or props["id"], pbf, geometry)
             self.regions[region.id] = region
@@ -648,6 +651,21 @@ class ExtractStore:
     def forget(self) -> None:
         """After 「清空缓存」: nothing is known about local files any more."""
         self._failed_until.clear()
+
+
+def _polygonal(geometry):
+    """The region's area as a valid (multi)polygon: some polygons in the index
+    cross themselves, and GEOS refuses to intersect those."""
+    if geometry.is_empty:
+        return None
+    if not geometry.is_valid:
+        geometry = shapely.make_valid(geometry)
+    if geometry.geom_type == "GeometryCollection":
+        parts = [g for g in geometry.geoms if g.geom_type in ("Polygon", "MultiPolygon")]
+        geometry = shapely.union_all(parts) if parts else None
+    if geometry is None or geometry.is_empty or geometry.geom_type not in ("Polygon", "MultiPolygon"):
+        return None
+    return geometry
 
 
 def _safe(rid: str) -> str:

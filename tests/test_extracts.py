@@ -160,6 +160,19 @@ def test_a_narrow_strip_of_a_neighbour_is_still_downloaded():
     assert sorted(r.id for r in index.most_specific(210, 97)) == ["big", "small"]
 
 
+def test_a_region_polygon_that_crosses_itself_is_repaired():
+    """Seen in Geofabrik's real index: GEOS refuses to intersect such a polygon."""
+    west, south, east, north = cell_bounds(210, 97)
+    bowtie = {"type": "Polygon", "coordinates": [[
+        [west - 1, south - 1], [east + 1, north + 1], [east + 1, south - 1], [west - 1, north + 1], [west - 1, south - 1],
+    ]]}
+    index = RegionIndex.from_json({"type": "FeatureCollection", "features": [
+        feature("asia", None, square(60, -10, 150, 60), "https://x/asia.osm.pbf"),
+        feature("anhui", "asia", bowtie, "https://x/anhui.osm.pbf"),
+    ]})
+    assert [r.id for r in index.most_specific(210, 97)] == ["anhui"]
+
+
 def test_continents_are_never_downloaded():
     index = RegionIndex.from_json(index_json("https://x"))
     # 20, 20 is outside every country: nothing to download
