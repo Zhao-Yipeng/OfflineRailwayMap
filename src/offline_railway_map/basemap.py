@@ -22,7 +22,7 @@ import requests
 from .coverage import CELL_ZOOM, CellCoverage
 from .downloader import BasemapStage
 from .grid import cell_id
-from .paths import Home
+from .paths import DataBlocked, Home
 from .pmtiles import COMPRESSION_GZIP, ArchiveGone, RemoteArchive, descendant_range, id_to_zxy, zxy_to_id
 
 log = logging.getLogger(__name__)
@@ -184,6 +184,10 @@ class LowzoomStore:
     def _db(self, create: bool) -> sqlite3.Connection | None:
         if self._conn is not None:
             return self._conn
+        if self.home.blocked:  # 「清空缓存」 in progress (SPEC §11.3)
+            if create:
+                raise DataBlocked("the data folder is being cleared")
+            return None
         if not create and not self.home.lowzoom_db.exists():
             return None
         self.home.ensure_data()

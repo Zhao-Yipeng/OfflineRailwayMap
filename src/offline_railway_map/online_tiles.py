@@ -34,7 +34,7 @@ import requests
 from .coverage import CellCoverage
 from .masking import TRANSPARENT_PNG, apply_mask
 from .net import Http, NetStatus
-from .paths import Home
+from .paths import DataBlocked, Home
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +140,10 @@ class OnlineTileCache:
     def _connection(self, create: bool) -> sqlite3.Connection | None:
         if self._conn is not None:
             return self._conn
+        if self.home.blocked:  # 「清空缓存」 in progress (SPEC §11.3)
+            if create:
+                raise DataBlocked("the data folder is being cleared")
+            return None
         if not create and not self.path.exists():
             return None
         self.home.ensure_dir(self.home.cache_dir)
@@ -321,7 +325,9 @@ class OnlineTiles:
             if response.status_code != 200:
                 raise ValueError(f"HTTP {response.status_code}")
             template = response.json()["tiles"][0]
-            if not template.startswith("https://") or "{z}" not in template:
+            # Same scheme as the TileJSON itself (https for OpenFreeMap).
+            scheme = source.tilejson.split("://", 1)[0]
+            if not template.startswith(f"{scheme}://") or "{z}" not in template:
                 raise ValueError(f"unexpected tile URL {template!r}")
         except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
             if isinstance(exc, requests.ConnectionError):

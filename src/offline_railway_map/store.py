@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from .grid import distance_km
-from .paths import Home
+from .paths import DataBlocked, Home
 
 SAME_STATION_KM = 1.0  # same name and kind closer than this: one search result
 
@@ -69,12 +69,19 @@ class StateStore:
         self.home = home
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
+        # Overpass usage counted while there is no database yet: a click on a
+        # line outside the cache must not create the data folder (SPEC §6.6).
+        self._memory_usage: dict[tuple[str, str], tuple[int, int]] = {}
 
     # -- connection --------------------------------------------------------------------
 
     def _db(self, create: bool) -> sqlite3.Connection | None:
         if self._conn is not None:
             return self._conn
+        if self.home.blocked:  # 「清空缓存」 in progress (SPEC §11.3)
+            if create:
+                raise DataBlocked("the data folder is being cleared")
+            return None
         path = self.home.state_db
         if not create and not path.exists():
             return None
@@ -218,10 +225,17 @@ class StateStore:
 
     def usage_today(self, endpoint: str) -> tuple[int, int]:
         rows = self._read("SELECT requests, bytes FROM usage WHERE endpoint=? AND day=?", (endpoint, self._today()))
-        return (rows[0][0], rows[0][1]) if rows else (0, 0)
+        stored = (rows[0][0], rows[0][1]) if rows else (0, 0)
+        memory = self._memory_usage.get((endpoint, self._today()), (0, 0))
+        return stored[0] + memory[0], stored[1] + memory[1]
 
     def add_usage(self, endpoint: str, requests: int, size: int) -> None:
         day = self._today()
+        with self._lock:
+            if not self.exists or self.home.blocked:
+                count, total = self._memory_usage.get((endpoint, day), (0, 0))
+                self._memory_usage[(endpoint, day)] = (count + requests, total + size)
+                return
         with self.write() as conn:
             conn.execute(
                 "INSERT INTO usage (endpoint, day, requests, bytes) VALUES (?, ?, ?, ?) "

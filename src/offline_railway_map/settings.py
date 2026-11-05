@@ -109,7 +109,7 @@ class Settings:
 
     def save_if_data_exists(self, home: Home) -> None:
         """Persist UI state only when the data folder is already there (SPEC D12)."""
-        if home.data_exists():
+        if home.data_exists() and not home.blocked:
             try:
                 self.save(home)
             except OSError:

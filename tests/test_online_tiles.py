@@ -56,7 +56,7 @@ def tilejson(fake, version: str):
     fake.routes["/planet"] = lambda r: (
         200,
         {"Content-Type": "application/json", "Cache-Control": "max-age=3600"},
-        ('{"tiles": ["%s/%s/{z}/{x}/{y}.pbf"], "maxzoom": 14}' % (fake.url.replace("http://", "https://"), version)).encode(),
+        ('{"tiles": ["%s/%s/{z}/{x}/{y}.pbf"], "maxzoom": 14}' % (fake.url, version)).encode(),
     )
 
 
@@ -230,18 +230,18 @@ def test_coverage_masks():
 
 
 def _plain_http_tiles(home, fake, coverage=None):
-    """OnlineTiles whose TileJSON points at the (plain HTTP) fake server."""
-    tiles, status = make_tiles(home, fake.url, coverage)
-    source = tiles.sources["ofm"]
-    tiles.sources["ofm"] = source.__class__(**{**source.__dict__, "tilejson": fake.url + "/planet"})
-    real_template = tiles._template
+    """OnlineTiles whose TileJSON is on the (plain HTTP) fake server."""
+    return make_tiles(home, fake.url, coverage)
 
-    def plain_http(src, refresh=False):
-        template = real_template(src, refresh)
-        return template.replace("https://", "http://") if template else template
 
-    tiles._template = plain_http
-    return tiles, status
+def test_tile_url_must_use_the_tilejson_scheme(home, fake):
+    fake.routes["/planet"] = lambda r: (
+        200, {"Content-Type": "application/json"}, b'{"tiles": ["ftp://elsewhere.example/{z}/{x}/{y}.pbf"]}'
+    )
+    tiles, _ = make_tiles(home, fake.url)
+    assert tiles.tile("ofm", 3, 1, 1) == b""
+    assert fake.count("/planet") == 1
+    tiles.close()
 
 
 def test_vector_tile_url_comes_from_the_tilejson(home, fake):

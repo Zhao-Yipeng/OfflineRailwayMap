@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +37,10 @@ def web_dir() -> Path:
     return Path(__file__).resolve().parent / "web"
 
 
+class DataBlocked(OSError):
+    """The data folder is being deleted: nothing may be created or opened in it."""
+
+
 class Home:
     """The program folder and its lazily created ``data`` folder."""
 
@@ -42,6 +48,27 @@ class Home:
         self.root = Path(root)
         self.data = self.root / "data"
         self._on_data_created: list[Callable[[], None]] = []
+        self._blocked = threading.Event()
+
+    # -- 「清空缓存」 gate ---------------------------------------------------------
+
+    @property
+    def blocked(self) -> bool:
+        """True while the data folder is being deleted (SPEC §11.3).
+
+        Every component checks this before opening or creating a file in the
+        data folder, so nothing is reopened (and locked, on Windows) or
+        recreated half-way through the deletion.
+        """
+        return self._blocked.is_set()
+
+    @contextmanager
+    def blocked_while_clearing(self) -> Iterator[None]:
+        self._blocked.set()
+        try:
+            yield
+        finally:
+            self._blocked.clear()
 
     # -- data folder ---------------------------------------------------------
 
@@ -53,6 +80,8 @@ class Home:
         self._on_data_created.append(callback)
 
     def ensure_data(self) -> Path:
+        if self.blocked:
+            raise DataBlocked("the data folder is being cleared")
         if not self.data.is_dir():
             self.data.mkdir(exist_ok=True)
             for callback in list(self._on_data_created):

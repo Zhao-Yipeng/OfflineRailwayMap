@@ -639,8 +639,9 @@ OfflineRailwayMap\                       程序文件夹（解压得到）
 - `data\` 按需创建。程序启动时不创建 `data\`，只有需要保存东西时才创建，例如开始下载、修改设置、在线浏览产生瓦片缓存。
 - 窗口位置、上次视野等界面状态，只在 `data\` 已经存在时于退出时保存。日志也只在 `data\` 已存在时写入文件，否则只保存在内存中。
 - Qt 设置使用 INI 文件（`data\settings.ini`），不使用 QSettings 默认的注册表存储。
-- Qt WebEngine 使用无痕配置（见 10.6），启动参数中关闭 GPU 着色器磁盘缓存（`--disable-gpu-shader-disk-cache`），并关闭崩溃转储。
-- Python 发布版不生成 .pyc。需要临时文件时一律放在 `data\tmp\`。
+- Qt WebEngine 使用无痕配置（见 10.6），启动参数中关闭 GPU 着色器磁盘缓存（`--disable-gpu-shader-disk-cache`），并关闭崩溃转储。Qt 自己的着色器和图形管线磁盘缓存也关闭（`Qt::AA_DisableShaderDiskCache` 和环境变量 `QT_DISABLE_SHADER_DISK_CACHE=1`），否则它会写到 `%LOCALAPPDATA%\OfflineRailwayMap\cache\`。
+- Python 发布版不生成 .pyc（入口脚本第一行设置 `sys.dont_write_bytecode`），否则可能在 `_internal\` 中生成 `__pycache__`。需要临时文件时一律放在 `data\tmp\`。
+- 没有 `data\` 时，点击未缓存区域线路查询详情所用的 Overpass 用量只记在内存中，不为此创建 `data\`。
 - 打包必须用 PyInstaller 的单文件夹模式（见第 4 节）。
 - 单实例：用 Windows 命名互斥量保证同一时间只运行一个实例，不创建锁文件。第二个实例启动时，激活已有的窗口后退出。
 - 程序文件夹必须可写。启动时检测，不可写时（例如放在 `C:\Program Files` 下）提示「请把程序文件夹放到可写的位置，例如 D:\Tools\OfflineRailwayMap」，然后退出。检测本身不得留下文件。
@@ -648,6 +649,10 @@ OfflineRailwayMap\                       程序文件夹（解压得到）
 ### 11.3 清空缓存的实现要求
 
 流程见 6.6。删除 `data\` 时，如果有文件因为被占用而删不掉，就在 `data\` 中只留下删不掉的文件和一个空的标记文件 `.clear_pending`。下次启动时，程序先完成删除，再做其他事。
+
+- 删除期间关闭「闸门」：任何组件都不得在 `data\` 中打开或新建文件（读取一律返回空，写入失败），所以删除时不会有文件被重新打开而锁住（Windows 不能删除打开中的文件），也不会被重新创建。删除前先关闭所有数据库、日志文件，并把在线瓦片缓存切换为只在内存中。
+- 只读文件先去掉只读属性再删除；每个文件最多尝试 3 轮，每轮间隔 1 秒（应对杀毒软件短暂占用）。
+- 测试 `tests/test_clear_everything.py` 模拟长期使用：多次启动和退出、下载方格、浏览各类瓦片、修改设置、留下崩溃残留，最后在页面不断请求瓦片和数据时清空。要求清空后程序文件夹与刚解压时完全一致，系统临时文件夹中也没有新文件。该测试在 Windows 上的 CI 中运行。
 
 ### 11.4 程序无法控制的系统痕迹
 

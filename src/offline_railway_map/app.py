@@ -20,6 +20,9 @@ def _set_chromium_flags() -> None:
     existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").split()
     flags = existing + [f for f in CHROMIUM_FLAGS if f not in existing]
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+    # Qt's own shader / graphics pipeline disk cache would go to
+    # %LOCALAPPDATA%\OfflineRailwayMap\cache (SPEC §11.2).
+    os.environ["QT_DISABLE_SHADER_DISK_CACHE"] = "1"
 
 
 # Chromium reads its flags when Qt WebEngine starts, so set them before any Qt import.
@@ -154,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     home = Home(program_dir())
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)  # required by Qt WebEngine
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DisableShaderDiskCache)  # nothing in %LOCALAPPDATA%
     app = QApplication(argv)
     app.setApplicationDisplayName(APP_NAME)
 

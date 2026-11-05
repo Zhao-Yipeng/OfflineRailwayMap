@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -24,7 +26,16 @@ def remove_data(home: Home, attempts: int = 3, delay: float = 1.0) -> list[Path]
         if not home.data.exists():
             return []
         failed = []
-        shutil.rmtree(home.data, onexc=lambda _fn, path, _exc: failed.append(Path(path)))
+
+        def retry_writable(fn, path, _exc) -> None:
+            # Windows refuses to delete read-only files: clear the flag, try once more.
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                fn(path)
+            except OSError:
+                failed.append(Path(path))
+
+        shutil.rmtree(home.data, onexc=retry_writable)
         if not home.data.exists():
             return []
         if attempt + 1 < attempts:

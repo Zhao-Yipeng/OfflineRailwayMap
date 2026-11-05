@@ -22,7 +22,7 @@ import shapely
 
 from .coverage import CELL_ZOOM, CellCoverage
 from .grid import cell_id
-from .paths import Home
+from .paths import DataBlocked, Home
 from .processing import MAX_TILE_ZOOM, encode_lowzoom
 
 log = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class RailTiles:
         """Read-only connection to one of the cell's databases (rail or basemap)."""
         key = (cid, name)
         with self._lock:
-            if cid in self._busy:
+            if cid in self._busy or self.home.blocked:
                 return None
             conn = self._conns.get(key)
             if conn is not None:
@@ -207,6 +207,10 @@ class RailTiles:
     def _disk_conn(self, create: bool) -> sqlite3.Connection | None:
         if self._disk is not None:
             return self._disk
+        if self.home.blocked:  # 「清空缓存」 in progress (SPEC §11.3)
+            if create:
+                raise DataBlocked("the data folder is being cleared")
+            return None
         path = self.home.cache_dir / "rail_lowzoom.sqlite"
         if not create and not path.exists():
             return None

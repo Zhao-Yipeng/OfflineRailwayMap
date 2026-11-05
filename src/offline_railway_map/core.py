@@ -77,6 +77,7 @@ class AppCore:
         hooks: ShellHooks | None = None,
         port: int = 0,
         downloads: bool = True,
+        online_sources: tuple | None = None,
     ) -> None:
         self.home = home
         self._downloads = downloads  # tests switch the background downloader off
@@ -86,7 +87,10 @@ class AppCore:
         self.http = Http(per_host=2)
         self.status = NetStatus(self.events)
         self.coverage = CellCoverage()
-        self.online = OnlineTiles(home, self.http, self.status, self.coverage, lambda: self.settings.online_cache_limit_mb)
+        self.online = OnlineTiles(
+            home, self.http, self.status, self.coverage, lambda: self.settings.online_cache_limit_mb,
+            **({"sources": online_sources} if online_sources else {}),
+        )
         self.store = StateStore(home)
         self.cells = CellService(
             home, self.store, self.coverage, self.events, default_basemap_maxzoom=lambda: self.settings.basemap_maxzoom
@@ -135,21 +139,25 @@ class AppCore:
         with self._clear_lock:
             self.downloader.suspend()
             try:
-                self.online.close()
-                self.rail.close_all()
-                self.rail.forget(list(self.rail._versions))
-                self.lowzoom.close()
-                self.store.close()
-                logs.detach_file()
-                failed = cleanup.remove_data(self.home)
-                # Reloading the map right after clearing must not recreate data\ (SPEC §6.6).
-                self.online.cache.memory_only = True
-                defaults = Settings()
-                for field in dataclasses.fields(Settings):
-                    setattr(self.settings, field.name, getattr(defaults, field.name))
-                self._estimates.clear()
-                self.overpass.forget_all()
-                self.cells.reset()
+                # While the gate is closed nothing opens or creates a file in
+                # data\, so no file is locked or recreated during the deletion.
+                with self.home.blocked_while_clearing():
+                    # Online tiles go to memory from now on, so reloading the map
+                    # after clearing does not recreate data\ (SPEC §6.6).
+                    self.online.cache.memory_only = True
+                    self.online.close()
+                    self.rail.close_all()
+                    self.rail.forget(list(self.rail._versions))
+                    self.lowzoom.close()
+                    self.store.close()
+                    logs.detach_file()
+                    failed = cleanup.remove_data(self.home)
+                    defaults = Settings()
+                    for field in dataclasses.fields(Settings):
+                        setattr(self.settings, field.name, getattr(defaults, field.name))
+                    self._estimates.clear()
+                    self.overpass.forget_all()
+                    self.cells.reset()
                 self.events.publish("settings", self.settings.public_dict())
             finally:
                 self.downloader.resume()
