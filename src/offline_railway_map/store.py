@@ -208,12 +208,17 @@ class StateStore:
         with self.write() as conn:
             conn.execute(f"UPDATE cells SET {assignments} WHERE id=?", (*fields.values(), cell_id))
 
-    def next_job(self) -> dict | None:
-        """The next cell to download or update, in queue order."""
+    def next_job(self, exclude: set[str] | frozenset[str] = frozenset()) -> dict | None:
+        """The next cell to download or update, in queue order, skipping ``exclude``
+        (cells other download workers are busy with)."""
         cols = ", ".join(CELL_COLUMNS)
+        skip = ",".join("?" * len(exclude))
         rows = self._read(
-            f"SELECT {cols} FROM cells WHERE status IN ('queued', 'downloading') "
-            "OR (status = 'updating' AND update_kind IS NOT NULL) ORDER BY queue_order, id LIMIT 1"
+            f"SELECT {cols} FROM cells WHERE (status IN ('queued', 'downloading') "
+            "OR (status = 'updating' AND update_kind IS NOT NULL))"
+            + (f" AND id NOT IN ({skip})" if exclude else "")
+            + " ORDER BY queue_order, id LIMIT 1",
+            tuple(sorted(exclude)),
         )
         return self._row(rows[0]) if rows else None
 

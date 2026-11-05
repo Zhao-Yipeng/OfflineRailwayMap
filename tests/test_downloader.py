@@ -66,7 +66,8 @@ def test_cell_is_downloaded_processed_and_installed(home, hooks, overpass):
         assert core.cells.request_update("210-97", with_basemap=False)
         assert core.coverage.is_cached(210, 97)
         assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached" and core.cells.tiles_version > version)
-        assert sum(1 for r in overpass.requests if r.path.startswith("/api/")) == 4 + 4, "four quarters each time"
+        assert overpass.count("/api/interpreter") == 4 + 4, "four quarters each time"
+        assert overpass.count("/api/status") == 1, "the server's slots are asked for once"
         assert (home.cell_dir("210-97") / "basemap.sqlite").exists(), "a railway-only update keeps the basemap"
         core.cells.delete(["210-97"])
         assert core.basemap_tiles.tile(4, 210 >> 4, 97 >> 4) is None, "ancestors go with the last cell"
@@ -154,5 +155,35 @@ def test_busy_servers_leave_a_visible_wait_on_the_cell(home, hooks, overpass):
 
         assert wait_for(waiting, timeout=30), core.cells.snapshot()["cells"][0]
         assert "忙" in core.cells.snapshot()["cells"][0]["activity"]
+    finally:
+        core.shutdown()
+
+
+def test_several_cells_download_at_the_same_time(home, hooks, overpass):
+    """Cells are worked on in parallel (one Overpass query per server slot)."""
+    import threading
+
+    lock = threading.Lock()
+    state = {"running": 0, "peak": 0}
+
+    def slow(rec):
+        with lock:
+            state["running"] += 1
+            state["peak"] = max(state["peak"], state["running"])
+        time.sleep(0.3)
+        with lock:
+            state["running"] -= 1
+        return 200, {"Content-Type": "application/json"}, overpass_json()
+
+    overpass.routes["/api/interpreter"] = slow
+    overpass.routes["/api/status"] = lambda r: (200, {}, b"Rate limit: 2\n2 slots available now.\n")
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        core.cells.apply(["210-97", "211-97", "210-98"], [], (116, 39))
+        assert wait_for(
+            lambda: all(core.store.cell(c)["status"] == "cached" for c in ("210-97", "211-97", "210-98")), timeout=60
+        ), [core.store.cell(c)["status"] for c in ("210-97", "211-97", "210-98")]
+        assert state["peak"] == 2, f"two queries at once on a server with two slots: {state}"
+        assert core.cells.snapshot()["cells"][0]["activity"] is None
     finally:
         core.shutdown()

@@ -99,6 +99,7 @@ button.link { background: none; border: none; box-shadow: none; padding: 0; colo
 .download-panel .panel-row { display: flex; flex-wrap: wrap; column-gap: 8px; row-gap: 2px; align-items: center; }
 .download-panel .panel-row > span { white-space: nowrap; }
 .download-panel .panel-detail { font-size: 12px; color: var(--muted); }
+.download-panel .panel-detail .cell-head { color: var(--text); font-weight: 600; }
 .download-panel button { padding: 2px 10px; box-shadow: none; }
 .download-panel .strong { font-weight: 600; }
 .download-panel .failed { color: var(--danger); }

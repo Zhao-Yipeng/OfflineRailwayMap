@@ -550,18 +550,19 @@ export class Cells {
 }
 
 export function downloadSummary(cells) {
-  let active = 0, cached = 0, failed = 0, bytes = 0, current = null, waiting = null;
+  let active = 0, cached = 0, failed = 0, bytes = 0;
+  const working = []; // cells being downloaded now (several at a time)
+  const waiting = []; // cells sent back to the queue, saying why and until when
   const now = Date.now() / 1000;
   for (const row of cells.cells.values()) {
     if (['queued', 'downloading', 'updating'].includes(row.status) && (row.status !== 'updating' || row.updateKind)) active += 1;
     if (row.status === 'cached') cached += 1;
     if (row.status === 'failed') failed += 1;
-    if (row.status === 'downloading' || (row.status === 'updating' && row.stage)) current = row;
-    // a cell sent back to the queue says why and until when (servers busy, offline)
-    if (!waiting && row.status === 'queued' && row.activity && (row.activityUntil || 0) > now) waiting = row;
+    if (row.status === 'downloading' || (row.status === 'updating' && row.stage)) working.push(row);
+    else if (row.status === 'queued' && row.activity && (row.activityUntil || 0) > now) waiting.push(row);
     bytes += row.bytes || 0;
   }
-  return { active, cached, failed, bytes, current: current || waiting };
+  return { active, cached, failed, bytes, current: [...working, ...waiting] };
 }
 
 function formatDuration(seconds) {
@@ -600,6 +601,22 @@ function remainingText(cached, active) {
   return minutes < 120 ? ` · 约剩 ${minutes} 分钟` : ` · 约剩 ${Math.round(minutes / 60)} 小时`;
 }
 
+const PANEL_CELL_LINES = 4;
+
+// One line per cell being worked on: stage, progress, what is happening, bytes received.
+function cellLine(row) {
+  const head = row.status === 'queued'
+    ? `${row.id} 等待重试`
+    : `${row.id} ${STAGE_LABELS[row.stage] || '准备'} ${Math.round((row.progress || 0) * 100)}%`;
+  const since = row.activitySince || '';
+  const until = row.activityUntil || '';
+  return el('div', { class: 'panel-detail' },
+    el('span', { class: 'cell-head' }, head),
+    row.activity ? ` · ${row.activity}` : '',
+    row.activity ? el('span', { class: 'live-timer', 'data-since': since, 'data-until': until }, timerText(since, until)) : '',
+    row.receivedBytes ? ` · 已接收 ${formatBytes(row.receivedBytes)}` : '');
+}
+
 export function renderDownloadPanel(cells) {
   const panel = $('download-panel');
   const { active, cached, failed, bytes, current } = downloadSummary(cells);
@@ -610,31 +627,21 @@ export function renderDownloadPanel(cells) {
     return;
   }
   const parts = [];
-  let detail = null;
+  const lines = [];
   if (active) {
     const head = cells.paused ? '已暂停' : '下载中';
     parts.push(el('span', { class: 'strong' }, `${head} ${cached}/${cached + active}`));
-    if (current && !cells.paused) {
-      if (current.status === 'queued') {
-        parts.push(el('span', {}, ` · ${current.id} 等待重试`));
-      } else {
-        const stage = STAGE_LABELS[current.stage] || '准备';
-        parts.push(el('span', {}, ` · ${current.id} ${stage} ${Math.round((current.progress || 0) * 100)}%`));
-      }
-      if (current.activity) {
-        const since = current.activitySince || '';
-        const until = current.activityUntil || '';
-        detail = el('div', { class: 'panel-detail' },
-          current.activity,
-          el('span', { class: 'live-timer', 'data-since': since, 'data-until': until }, timerText(since, until)),
-          current.receivedBytes ? ` · 本格已接收 ${formatBytes(current.receivedBytes)}` : '');
-      }
-    }
     parts.push(el('span', { class: 'muted' }, ` · 已缓存 ${formatBytes(bytes)}${cells.paused ? '' : eta}`));
     parts.push(el('button', {
       type: 'button',
       onclick: () => api.post('/api/downloads/pause', { paused: !cells.paused }).catch((e) => toast(e.message, 'error')),
     }, cells.paused ? '继续' : '暂停'));
+    if (!cells.paused) {
+      for (const row of current.slice(0, PANEL_CELL_LINES)) lines.push(cellLine(row));
+      if (current.length > PANEL_CELL_LINES) {
+        lines.push(el('div', { class: 'panel-detail' }, `另有 ${current.length - PANEL_CELL_LINES} 格正在进行`));
+      }
+    }
   }
   if (failed) {
     const failedIds = [...cells.cells.values()].filter((r) => r.status === 'failed').map((r) => r.id);
@@ -644,6 +651,6 @@ export function renderDownloadPanel(cells) {
       onclick: () => api.post('/api/cells/retry', { ids: failedIds }).catch((e) => toast(e.message, 'error')),
     }, '全部重试'));
   }
-  panel.replaceChildren(el('div', { class: 'panel-row' }, ...parts), ...(detail ? [detail] : []));
+  panel.replaceChildren(el('div', { class: 'panel-row' }, ...parts), ...lines);
   panel.hidden = false;
 }

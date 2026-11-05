@@ -4,6 +4,7 @@ import json
 import re
 import socket
 import threading
+import time
 from urllib.parse import parse_qs
 
 import pytest
@@ -64,7 +65,7 @@ def make_client(home, endpoints, *, busy_seconds=0.0):
     store = StateStore(home)
     client = OverpassClient(
         session, lambda: endpoints, store, min_interval=0, default_retry_after=0.01,
-        busy_backoff=(0.01, 0.01), busy_response_seconds=busy_seconds,
+        busy_backoff=(0.01, 0.01), busy_response_seconds=busy_seconds, server_slots=lambda e: 1,
     )
     return client, store
 
@@ -229,20 +230,19 @@ def test_retry_continues_where_it_stopped(home, fake):
     store.close()
 
 
-def test_only_the_current_cell_is_remembered(home, fake):
-    fake.routes["/a"] = lambda r: (504, {}, b"") if whole_cell(r) else reply([{"type": "way", "id": 1}])
+def test_partly_downloaded_cells_are_remembered_up_to_a_limit(home, fake, monkeypatch):
+    import offline_railway_map.overpass as overpass_module
+
+    monkeypatch.setattr(overpass_module, "REMEMBERED_CELLS", 2)
     fake.routes["/b"] = lambda r: (504, {}, b"")
-    endpoints = [fake.url + "/a"]
-    client, store = make_client(home, endpoints)
-    client.fetch_cell(210, 97, threading.Event(), lambda p: None)
-    endpoints[0] = fake.url + "/b"
-    with pytest.raises(ServersBusy):
-        client.fetch_cell(210, 97, threading.Event(), lambda p: None)
-    assert list(client._progress) == [(210, 97)]
-    with pytest.raises(ServersBusy):
-        client.fetch_cell(211, 97, threading.Event(), lambda p: None)
-    assert list(client._progress) == [(211, 97)], "the previous cell's parts are dropped"
-    client.forget_cell(211, 97)
+    client, store = make_client(home, [fake.url + "/b"])
+    for x in (210, 211, 212):
+        with pytest.raises(ServersBusy):
+            client.fetch_cell(x, 97, threading.Event(), lambda p: None)
+    assert list(client._progress) == [(211, 97), (212, 97)], "the oldest cell's parts are dropped"
+    client.forget_cell(212, 97)
+    assert list(client._progress) == [(211, 97)]
+    client.forget_all()
     assert client._progress == {}
     store.close()
 
@@ -373,4 +373,75 @@ def test_activity_and_received_bytes_are_reported(home, fake):
     )
     assert len(activity) == 4 and all("127.0.0.1" in text and since for text, since, _ in activity)
     assert sum(received) == sum(len(json.dumps({"elements": [{"type": "way", "id": 1}]})) for _ in range(4))
+    store.close()
+
+
+def test_rate_limit_is_read_from_the_status_page():
+    from offline_railway_map.overpass import rate_limit
+
+    assert rate_limit("Connected as: 1\nCurrent time: x\nRate limit: 2\n2 slots available now.\n") == 2
+    assert rate_limit("Rate limit: 0\n") == 0
+    assert rate_limit("nothing here") is None
+
+
+def test_slots_come_from_the_server_status(home, fake):
+    fake.routes["/one/api/status"] = lambda r: (200, {}, b"Rate limit: 1\n1 slots available now.\n")
+    fake.routes["/unlimited/api/status"] = lambda r: (200, {}, b"Rate limit: 0\n")
+    fake.routes["/many/api/status"] = lambda r: (200, {}, b"Rate limit: 6\n")
+    session = requests.Session()
+    store = StateStore(home)
+    client = OverpassClient(session, lambda: [], store, min_interval=0)
+    assert client._slot_count(fake.url + "/one/api/interpreter") == 1
+    assert client._slot_count(fake.url + "/unlimited/api/interpreter") == 2, "polite cap when unlimited"
+    assert client._slot_count(fake.url + "/many/api/interpreter") == 2, "never more than 2 per server"
+    assert client._slot_count(fake.url + "/silent/api/interpreter") == 1, "unknown: one at a time"
+    assert client._slot_count(fake.url + "/no-status-page") == 1
+    assert client._slot_count("https://overpass-api.de/api/interpreter") == 1, "its policy: no parallel queries"
+    store.close()
+
+
+def test_cells_in_parallel_use_free_servers_within_their_slots(home, fake):
+    """Three cells at once, two servers with one slot each: never more than one
+    query per server, both servers busy at the same time."""
+    lock = threading.Lock()
+    running = {"/a": 0, "/b": 0}
+    peak = {"/a": 0, "/b": 0, "total": 0}
+
+    def route(rec):
+        with lock:
+            running[rec.path] += 1
+            peak[rec.path] = max(peak[rec.path], running[rec.path])
+            peak["total"] = max(peak["total"], sum(running.values()))
+        time.sleep(0.15)
+        with lock:
+            running[rec.path] -= 1
+        return reply([{"type": "way", "id": 1}])
+
+    fake.routes["/a"] = route
+    fake.routes["/b"] = route
+    client, store = make_client(home, [fake.url + "/a", fake.url + "/b"])
+    results = {}
+
+    def fetch(x):
+        results[x] = client.fetch_cell(x, 97, threading.Event(), lambda p: None)
+
+    threads = [threading.Thread(target=fetch, args=(x,)) for x in (210, 211, 212)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert sorted(results) == [210, 211, 212]
+    assert peak["/a"] == 1 and peak["/b"] == 1, peak
+    assert peak["total"] == 2, "both servers worked at the same time"
+    assert len(fake.requests) == 3 * 4
+    store.close()
+
+
+def test_requests_to_one_server_start_a_second_apart(home, fake):
+    fake.routes["/a"] = lambda r: reply([])
+    client, store = make_client(home, [fake.url + "/a"])
+    client.min_interval = 0.2
+    started = time.monotonic()
+    client.fetch_cell(1, 1, threading.Event(), lambda p: None)  # four parts
+    assert time.monotonic() - started >= 3 * 0.2 - 0.01
     store.close()

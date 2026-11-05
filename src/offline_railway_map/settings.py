@@ -16,10 +16,13 @@ from .paths import Home
 
 log = logging.getLogger(__name__)
 
+# The free public instances with worldwide data (OSM wiki, Overpass API).
+# overpass-api.de says it is overloaded and asks to use the others if
+# possible, so it comes last (SPEC §12.4).
 DEFAULT_OVERPASS_ENDPOINTS = (
-    "https://overpass-api.de/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
 )
 BASEMAP_ZOOM_CHOICES = (12, 13, 14, 15)
 DEFAULT_VIEW = (105.0, 35.0, 4.0)  # SPEC §6.2: China-centred z4

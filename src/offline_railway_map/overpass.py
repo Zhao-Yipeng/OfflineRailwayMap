@@ -2,7 +2,11 @@
 
 * a cell is fetched as its four z9 quarters (faster answers, accepted more
   readily by busy servers, and progress the user can see);
-* one request at a time, at least 1 s apart;
+* several cells can be downloaded at once (downloader.py); each server gets at
+  most as many queries at a time as its /api/status allows ("Rate limit: N"),
+  never more than 2, and 1 if it does not say; requests to one server start at
+  least 1 s apart; a query goes to the first server (in the order below) that
+  has a free slot;
 * 429 -> wait as long as the server's /api/status says (Retry-After, or 60 s
   if neither is known), up to 3 times per server, then the next server;
 * a 502/503/504 that comes back quickly means the server is busy: try the
@@ -69,6 +73,11 @@ BUSY_ROUNDS_BEFORE_SPLIT = 2
 DOWN_FOR = 600.0
 TROUBLE_FOR = 300.0  # a server that was busy or timed out goes after the others
 MAX_SLOT_WAIT = 300.0
+MAX_SLOTS_PER_SERVER = 2  # queries at once on one server, even if it allows more
+# Servers whose usage policy allows fewer queries at once than their status
+# page says: overpass-api.de asks for "no parallel running of multiple scripts".
+SERVER_SLOT_CAPS = {"overpass-api.de": 1}
+REMEMBERED_CELLS = 8  # partly downloaded cells kept in memory (see fetch_cell)
 
 Activity = Callable[..., None]  # activity(text, since=None, until=None)
 
@@ -84,6 +93,12 @@ def host_of(endpoint: str) -> str:
 def status_url(endpoint: str) -> str | None:
     """``.../api/interpreter`` -> ``.../api/status`` (Overpass rate-limit information)."""
     return endpoint[: -len("interpreter")] + "status" if endpoint.endswith("/interpreter") else None
+
+
+def rate_limit(status_text: str) -> int | None:
+    """Query slots per client from an Overpass ``/api/status`` page (0 = no limit)."""
+    match = re.search(r"^\s*Rate limit:\s*(\d+)", status_text, re.M)
+    return int(match.group(1)) if match else None
 
 
 def slot_wait(status_text: str) -> float | None:
@@ -141,6 +156,7 @@ class OverpassClient:
         default_retry_after: float = 60.0,
         busy_backoff: tuple[float, ...] = BUSY_BACKOFF,
         busy_response_seconds: float = BUSY_RESPONSE_SECONDS,
+        server_slots: Callable[[str], int] | None = None,
     ) -> None:
         self.session = session
         self.endpoints = endpoints
@@ -149,20 +165,26 @@ class OverpassClient:
         self.default_retry_after = default_retry_after
         self.busy_backoff = busy_backoff
         self.busy_response_seconds = busy_response_seconds
-        self._last_request = 0.0
+        self._server_slots = server_slots  # tests fix the slots instead of asking the server
         self._lock = threading.Lock()
+        self._last_request: dict[str, float] = {}
+        self._slots: dict[str, threading.BoundedSemaphore] = {}
+        self._slots_lock = threading.Lock()
+        self._asking: dict[str, threading.Lock] = {}
         self._down_until: dict[str, float] = {}
         self._trouble_until: dict[str, float] = {}
-        # For the cell being downloaded, kept in memory while the program runs:
+        # For cells being downloaded, kept in memory while the program runs:
         # parts already downloaded and the part size known to be too large, so a
         # retry (the cell goes back to the queue) continues where it stopped.
         self._progress: dict[tuple[int, int], dict] = {}
 
     def forget_cell(self, x: int, y: int) -> None:
-        self._progress.pop((x, y), None)
+        with self._lock:
+            self._progress.pop((x, y), None)
 
     def forget_all(self) -> None:
-        self._progress.clear()
+        with self._lock:
+            self._progress.clear()
 
     # -- public ------------------------------------------------------------------------
 
@@ -176,9 +198,11 @@ class OverpassClient:
         received: Callable[[int], None] = lambda n: None,
     ) -> list[dict]:
         """All railway ways and stations touching the cell, deduplicated."""
-        if (x, y) not in self._progress:
-            self._progress.clear()  # only one cell's parts are kept (memory)
-        state = self._progress.setdefault((x, y), {"heavy": -1, "done": {}})
+        with self._lock:
+            state = self._progress.pop((x, y), None) or {"heavy": -1, "done": {}}
+            self._progress[(x, y)] = state  # most recently used last
+            while len(self._progress) > REMEMBERED_CELLS:  # bound the memory used
+                self._progress.pop(next(iter(self._progress)))
         found: dict[tuple[str, int], dict] = {}
         pending = [(FIRST_ZOOM, 2 * x + dx, 2 * y + dy, 0.25) for dy in (0, 1) for dx in (0, 1)]
         done = 0.0
@@ -207,7 +231,7 @@ class OverpassClient:
                 found[(element["type"], element["id"])] = element
             done += weight
             progress(min(1.0, done))
-        self._progress.pop((x, y), None)
+        self.forget_cell(x, y)
         return list(found.values())
 
     def lines_near(self, lon: float, lat: float, radius: float) -> list[dict]:
@@ -265,65 +289,29 @@ class OverpassClient:
             tried = connection_failures = heavy_failures = busy = 0
             last_problem = "no server available"
             problems: list[str] = []
-            for endpoint in self._ordered_endpoints():
-                if not self._within_budget(endpoint):
-                    continue
+            # Each server once per round, the first one with a free slot first.
+            remaining = [e for e in self._ordered_endpoints() if self._within_budget(e)]
+            while remaining:
+                endpoint = self._take_slot(remaining, cancel, activity)
+                remaining.remove(endpoint)
+                try:
+                    outcome = self._ask(
+                        endpoint, query, cancel, read_timeout, activity, received
+                    )
+                finally:
+                    self._slots[endpoint].release()
                 tried += 1
-                rate_limited = 0
-                host = host_of(endpoint)
-                while True:
-                    self._pace(cancel)
-                    started = time.monotonic()
-                    activity(f"等待 {host} 返回数据", since=time.time())
-                    try:
-                        elements = self._post(endpoint, query, cancel, read_timeout, received)
-                        self._trouble_until.pop(endpoint, None)
-                        self._down_until.pop(endpoint, None)
-                        return elements
-                    except requests.ConnectionError as exc:
-                        connection_failures += 1
-                        self._down_until[endpoint] = time.monotonic() + DOWN_FOR
-                        last_problem = f"{endpoint}: 无法连接"
-                        problems.append(f"{host} 无法连接")
-                        log.warning("Overpass %s unreachable: %s", endpoint, exc)
-                        break
-                    except requests.Timeout:
-                        heavy_failures += 1
-                        self._trouble_until[endpoint] = time.monotonic() + TROUBLE_FOR
-                        last_problem = f"{endpoint}: 超时"
-                        problems.append(f"{host} 超时")
-                        log.info("Overpass %s timed out", endpoint)
-                        break
-                    except _HttpError as exc:
-                        if exc.status == 429 and rate_limited < MAX_429_RETRIES:
-                            rate_limited += 1
-                            wait = exc.retry_after
-                            if wait is None:
-                                wait = self._slot_wait(endpoint)
-                            if wait is None:
-                                wait = self.default_retry_after
-                            wait = max(1.0, min(wait, MAX_SLOT_WAIT))
-                            log.info("Overpass %s: rate limited, waiting %.0f s", endpoint, wait)
-                            activity(f"{host} 限制了请求频率，按服务器要求等待", until=time.time() + wait)
-                            self._wait(wait, cancel)
-                            continue
-                        if exc.status == 400:
-                            raise QueryFailed(f"{endpoint} 拒绝了查询（rejected the query）") from None
-                        if exc.status in (429, 502, 503, 504):
-                            if time.monotonic() - started < self.busy_response_seconds:
-                                busy += 1
-                            else:
-                                heavy_failures += 1
-                            self._trouble_until[endpoint] = time.monotonic() + TROUBLE_FOR
-                        last_problem = f"{endpoint}: {exc}"
-                        problems.append(f"{host} {exc}")
-                        log.info("Overpass %s answered %s", endpoint, exc)
-                        break
-                    except _NeedsSplit as exc:
-                        heavy_failures += 1
-                        last_problem = f"{endpoint}: {exc}"
-                        problems.append(f"{host} 无法完成查询")
-                        break
+                kind, value = outcome
+                if kind == "elements":
+                    return value
+                problems.append(value[1])
+                last_problem = value[0]
+                if kind == "offline":
+                    connection_failures += 1
+                elif kind == "heavy":
+                    heavy_failures += 1
+                elif kind == "busy":
+                    busy += 1
                 if can_split and heavy_failures >= HEAVY_FAILURES_BEFORE_SPLIT:
                     raise _NeedsSplit(last_problem)
             if tried == 0:
@@ -340,6 +328,116 @@ class OverpassClient:
                 activity(f"服务器都很忙（{'；'.join(problems)}），稍后重试", until=time.time() + wait)
                 self._wait(wait, cancel)
         raise ServersBusy(f"Overpass 服务器繁忙（{last_problem}）")
+
+    # -- one server --------------------------------------------------------------------
+
+    def _slot_count(self, endpoint: str) -> int:
+        """Queries this client may run at once on ``endpoint`` (its /api/status)."""
+        if self._server_slots is not None:
+            return max(1, self._server_slots(endpoint))
+        cap = SERVER_SLOT_CAPS.get(host_of(endpoint), MAX_SLOTS_PER_SERVER)
+        if cap == 1:
+            return 1
+        url = status_url(endpoint)
+        if url is None:
+            return 1
+        try:
+            response = self.session.get(url, timeout=(10, 15))
+            limit = rate_limit(response.text) if response.status_code == 200 else None
+        except requests.RequestException:
+            limit = None
+        if limit is None:
+            return 1
+        slots = cap if limit == 0 else min(limit, cap)
+        log.info("Overpass %s: %d quer%s at a time", endpoint, slots, "y" if slots == 1 else "ies")
+        return slots
+
+    def _slot(self, endpoint: str) -> threading.BoundedSemaphore:
+        with self._slots_lock:
+            slot = self._slots.get(endpoint)
+            if slot is not None:
+                return slot
+            asking = self._asking.setdefault(endpoint, threading.Lock())
+        with asking:  # one status request per server; other servers are not held up
+            with self._slots_lock:
+                slot = self._slots.get(endpoint)
+            if slot is None:
+                slot = threading.BoundedSemaphore(self._slot_count(endpoint))
+                with self._slots_lock:
+                    slot = self._slots.setdefault(endpoint, slot)
+            return slot
+
+    def _take_slot(self, candidates: list[str], cancel: threading.Event, activity: Activity) -> str:
+        """Wait for a free query slot on one of ``candidates`` (in order); return that server."""
+        waited = False
+        while True:
+            for endpoint in candidates:
+                if self._slot(endpoint).acquire(blocking=False):
+                    return endpoint
+            if not waited:
+                activity("等待空闲的服务器（其他方格正在查询）", since=time.time())
+                waited = True
+            if cancel.wait(0.2):
+                raise Cancelled()
+
+    def _ask(
+        self,
+        endpoint: str,
+        query: str,
+        cancel: threading.Event,
+        read_timeout: float,
+        activity: Activity,
+        received: Callable[[int], None],
+    ) -> tuple[str, object]:
+        """Ask one server, holding one of its slots.
+
+        Returns ("elements", list) or (kind, (problem, short text for the UI))
+        with kind "offline", "heavy" (too much data), "busy" or "other".
+        """
+        rate_limited = 0
+        host = host_of(endpoint)
+        while True:
+            self._pace(endpoint, cancel)
+            started = time.monotonic()
+            activity(f"等待 {host} 返回数据", since=time.time())
+            try:
+                elements = self._post(endpoint, query, cancel, read_timeout, received)
+                self._trouble_until.pop(endpoint, None)
+                self._down_until.pop(endpoint, None)
+                return "elements", elements
+            except requests.ConnectionError as exc:
+                self._down_until[endpoint] = time.monotonic() + DOWN_FOR
+                log.warning("Overpass %s unreachable: %s", endpoint, exc)
+                return "offline", (f"{endpoint}: 无法连接", f"{host} 无法连接")
+            except requests.Timeout:
+                self._trouble_until[endpoint] = time.monotonic() + TROUBLE_FOR
+                log.info("Overpass %s timed out", endpoint)
+                return "heavy", (f"{endpoint}: 超时", f"{host} 超时")
+            except _HttpError as exc:
+                if exc.status == 429 and rate_limited < MAX_429_RETRIES:
+                    rate_limited += 1
+                    wait = exc.retry_after
+                    if wait is None:
+                        wait = self._slot_wait(endpoint)
+                    if wait is None:
+                        wait = self.default_retry_after
+                    wait = max(1.0, min(wait, MAX_SLOT_WAIT))
+                    log.info("Overpass %s: rate limited, waiting %.0f s", endpoint, wait)
+                    activity(f"{host} 限制了请求频率，按服务器要求等待", until=time.time() + wait)
+                    self._wait(wait, cancel)
+                    continue
+                if exc.status == 400:
+                    raise QueryFailed(f"{endpoint} 拒绝了查询（rejected the query）") from None
+                log.info("Overpass %s answered %s", endpoint, exc)
+                problem = (f"{endpoint}: {exc}", f"{host} {exc}")
+                if exc.status in (429, 502, 503, 504):
+                    self._trouble_until[endpoint] = time.monotonic() + TROUBLE_FOR
+                    if time.monotonic() - started < self.busy_response_seconds:
+                        return "busy", problem
+                    return "heavy", problem
+                return "other", problem
+            except _NeedsSplit as exc:
+                return "heavy", (f"{endpoint}: {exc}", f"{host} 无法完成查询")
 
     def _slot_wait(self, endpoint: str) -> float | None:
         """Ask the server when our next query slot is free (Overpass /api/status)."""
@@ -396,15 +494,17 @@ class OverpassClient:
 
     # -- pacing and budget -------------------------------------------------------------------
 
-    def _pace(self, cancel: threading.Event) -> None:
-        if cancel.is_set():
-            raise Cancelled()
-        with self._lock:
-            wait = self._last_request + self.min_interval - time.monotonic()
-        if wait > 0:
+    def _pace(self, endpoint: str, cancel: threading.Event) -> None:
+        """Requests to one server start at least ``min_interval`` apart."""
+        while True:
+            if cancel.is_set():
+                raise Cancelled()
+            with self._lock:
+                wait = self._last_request.get(endpoint, 0.0) + self.min_interval - time.monotonic()
+                if wait <= 0:
+                    self._last_request[endpoint] = time.monotonic()
+                    return
             self._wait(wait, cancel)
-        with self._lock:
-            self._last_request = time.monotonic()
 
     @staticmethod
     def _wait(seconds: float, cancel: threading.Event) -> None:

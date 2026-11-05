@@ -25,6 +25,10 @@ TILE_TYPE_MVT = 1
 MERGE_GAP = 64 * 1024
 MAX_RANGE = 16 * 1024 * 1024
 RETRY_DELAYS = (5.0, 15.0, 60.0)
+# Range requests in flight at once, over all cells being downloaded: the same
+# as the official `pmtiles extract` default (--download-threads=4).
+RANGE_REQUESTS_AT_ONCE = 4
+_range_slots = threading.BoundedSemaphore(RANGE_REQUESTS_AT_ONCE)
 
 
 class PMTilesError(Exception):
@@ -237,7 +241,7 @@ class RemoteArchive:
         pieces: list[tuple[int, int]],
         cancel: threading.Event | None,
         progress: Callable[[int], None] = lambda _n: None,
-        workers: int = 2,
+        workers: int = RANGE_REQUESTS_AT_ONCE,
     ) -> dict[tuple[int, int], bytes]:
         """Download tile data for (offset, length) pieces, merging neighbours."""
         unique = sorted(set(pieces))
@@ -257,7 +261,8 @@ class RemoteArchive:
         def work(group):
             start = group[0][0]
             end = max(o + n for o, n in group)
-            blob = self.read(self.header.data_offset + start, end - start, cancel)
+            with _range_slots:  # shared by all cells downloading at the same time
+                blob = self.read(self.header.data_offset + start, end - start, cancel)
             with lock:
                 for o, n in group:
                     result[(o, n)] = blob[o - start:o - start + n]
