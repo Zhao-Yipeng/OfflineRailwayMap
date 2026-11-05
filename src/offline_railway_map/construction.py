@@ -1,15 +1,18 @@
 """Lines under construction in uncached areas (setting 「永远显示在建线路」, SPEC §7.9).
 
-The ORM speed tiles show lines under construction only from z9, and only main
-and branch lines.  With this setting on, the program fetches the
-``railway=construction`` ways of the area being looked at from Overpass and
-draws them the way cached cells draw them: at every zoom, coloured by speed,
-with the same widths (SPEC §7.3–7.5).
+The ORM speed tiles draw lines under construction from z9 (main and branch
+lines; subways from z10, trams from z11 ...), but below z9 they draw none,
+and no public service offers such pictures.  With this setting on, the
+program fetches the railway lines under construction (``railway=construction``
+of type rail, without ``service``) of the area being looked at from Overpass
+and draws them the way cached cells draw them: at every zoom, coloured by
+speed, with the same widths (SPEC §7.3–7.5).
 
-* Data areas are map tiles.  A view at zoom z needs the areas at
-  ``data_zoom(z)``: z3 for overviews down to z6 for close views.  They are
-  fetched one at a time, the most recently needed first; an area the servers
-  refuse is asked for as its four quarters.
+* Only overviews (z8 and below) fetch anything; closer views use what is
+  already there, and the ORM tiles draw the rest.  Data areas are map tiles:
+  a view at zoom z needs the areas at ``data_zoom(z)`` (z3 up to z6, z4 at
+  z7, z5 at z8).  They are fetched one at a time, the most recently needed
+  first; an area the servers refuse is asked for as its four quarters.
 * Kept in ``data/cache/construction.sqlite`` for ``FRESH_FOR`` (7 days); after
   that an area is fetched again when needed, and the old data is shown until
   then.  A bigger area replaces the smaller ones inside it.
@@ -55,13 +58,20 @@ from .speed import speed_label
 
 log = logging.getLogger(__name__)
 
+# Railway lines under construction, the ones drawn below z9 (SPEC §7.3 rules
+# 16-17).  Subways, trams, sidings and yards under construction appear from
+# z10 and the ORM tiles draw them there; leaving them out makes the answers
+# several times smaller (Beijing: 4 of 48 ways under construction).
 QUERY = (
     "[out:json][timeout:{timeout}];\n"
-    'way["railway"="construction"]({s},{w},{n},{e});\n'
+    "(\n"
+    'way["railway"="construction"]["construction"="rail"][!"service"]({s},{w},{n},{e});\n'
+    'way["railway"="construction"]["construction:railway"="rail"][!"service"]({s},{w},{n},{e});\n'
+    ");\n"
     "out tags geom;"
 )
 TOP_ZOOM = 3  # the biggest areas asked for (views up to z6)
-CLOSE_ZOOM = 6  # areas for close views (z9 and closer)
+LAST_FETCH_ZOOM = 8  # closer views fetch nothing: the ORM tiles draw these lines there
 MAX_SPLIT_ZOOM = 8  # an area the servers refuse is split down to this size
 SERVER_TIMEOUT = 180
 FRESH_FOR = 7 * 24 * 3600.0
@@ -75,8 +85,8 @@ Key = tuple[int, int, int]
 
 
 def data_zoom(view_zoom: int) -> int:
-    """Size of the areas a view at ``view_zoom`` needs."""
-    return max(TOP_ZOOM, min(CLOSE_ZOOM, view_zoom - 3))
+    """Size of the areas a view at ``view_zoom`` (at most ``LAST_FETCH_ZOOM``) needs."""
+    return max(TOP_ZOOM, min(LAST_FETCH_ZOOM, view_zoom) - 3)
 
 
 def build_query(key: Key, timeout: int = SERVER_TIMEOUT) -> str:
@@ -111,11 +121,12 @@ class _Area:
 
 
 def _make_lines(rows) -> list[_Line]:
-    """(way id, tags, (lon, lat) array) -> lines ready for tiles; only lines under construction."""
+    """(way id, tags, (lon, lat) array) -> lines ready for tiles: railway lines under
+    construction without ``service`` (what QUERY asks for)."""
     lines = []
     for way_id, tags, coords in rows:
         cls = classify(tags)
-        if cls is None or cls.state != "construction" or len(coords) < 2:
+        if cls is None or cls.state != "construction" or cls.kind != "rail" or cls.service or len(coords) < 2:
             continue
         geom = LineString(to_mercator(np.asarray(coords, dtype=np.float64)))
         if geom.length == 0:
@@ -201,6 +212,8 @@ class ConstructionLines:
         return data
 
     def _want_for_tile(self, z: int, x: int, y: int) -> None:
+        if z > LAST_FETCH_ZOOM:
+            return  # zoomed in: the ORM tiles draw these lines; use what is already here
         level = data_zoom(z)
         if z >= level:
             shift = z - level

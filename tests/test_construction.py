@@ -29,11 +29,21 @@ def ways() -> list[dict]:
         # a high-speed line under construction near Beijing: drawn at every zoom
         way(1, [(116.1, 39.6), (116.7, 40.2)], railway="construction", construction="rail", usage="main",
             maxspeed="350", name="在建高铁"),
-        # a subway under construction: like a subway, from z10
+        # a subway under construction: from z10, where the ORM tiles draw it
         way(2, [(116.38, 39.89), (116.42, 39.91)], railway="construction", construction="subway"),
         # built lines are not part of the overlay (ORM's tiles draw them)
         way(3, [(116.1, 39.7), (116.5, 40.0)], railway="rail", usage="main", maxspeed="200"),
+        # a siding under construction: from z13, where the ORM tiles draw it
+        way(4, [(116.40, 39.90), (116.41, 39.905)], railway="construction", **{"construction:railway": "rail"},
+            service="siding"),
     ]
+
+
+def asked_for(query: str, element: dict) -> bool:
+    """What our query selects: railway lines under construction without service."""
+    tags = element["tags"]
+    rail = tags.get("construction") == "rail" or tags.get("construction:railway") == "rail"
+    return tags.get("railway") == "construction" and rail and "service" not in tags
 
 
 def bbox_of(query: str) -> tuple[float, float, float, float]:
@@ -63,7 +73,7 @@ class Overpass:
             body = {"elements": [], "remark": "runtime error: Query run out of memory using about 2048 MB of RAM."}
         else:
             found = [x for x in ways() if any(w <= p["lon"] <= e and s <= p["lat"] <= n for p in x["geometry"])]
-            body = {"elements": found}
+            body = {"elements": [x for x in found if asked_for(query, x)]}
         return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
 
     @property
@@ -145,25 +155,33 @@ def test_lines_under_construction_at_every_zoom_drawn_like_built_lines(home, ove
         found = features(wait_for(lines, z))
         ids = {f["id"] for f in found}
         assert 1 in ids, f"the high-speed line is shown at z{z}"
-        assert 3 not in ids, "built lines come from the ORM tiles"
         line = next(f for f in found if f["id"] == 1)
         assert line["properties"]["st"] == "c" and line["properties"]["sp"] == 350, "coloured by its speed"
-        assert (2 in ids) == (z >= 10), "a subway under construction appears from z10, like a subway"
+        assert ids == {1}, "built lines, subways and sidings: the ORM tiles draw them where they appear"
     assert lines.changes, "the page is told to reload the overlay"
     assert (home.cache_dir / "construction.sqlite").exists()
 
 
-def test_close_views_ask_for_small_areas(home, overpass):
+def test_zooming_in_asks_for_nothing(home, overpass):
+    """From z9 the ORM tiles draw lines under construction: nothing to wait for."""
     lines = make(home, overpass)
-    wait_for(lines, 12)
+    assert lines.tile(*tile_at(12)) == b""
+    time.sleep(0.3)
+    assert overpass.queries == []
+    wait_for(lines, 8)
     s, w, n, e = overpass.queries[0]
-    assert data_zoom(12) == 6 and e - w == pytest.approx(360 / 2**6)
+    assert data_zoom(8) == 5 and e - w == pytest.approx(360 / 2**5), "a z8 view asks for its z5 area"
+    asked = len(overpass.queries)
+    assert {f["id"] for f in features(lines.tile(*tile_at(12)))} == {1}, "drawn from what the overview fetched"
+    time.sleep(0.3)
+    assert len(overpass.queries) == asked
 
 
 def test_inside_cached_cells_the_cell_draws_its_own_lines(home, overpass):
     coverage = CellCoverage()
     lines = make(home, overpass, coverage=coverage)
-    wait_for(lines, 10)
+    wait_for(lines, 8)
+    assert features(lines.tile(*tile_at(10)))
     z, x, y = tile_at(10)
     coverage.replace({(x >> 2, y >> 2)})
     assert lines.tile(z, x, y) == b""
