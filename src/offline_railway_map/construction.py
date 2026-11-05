@@ -66,16 +66,21 @@ CHINA = "china"  # Geofabrik's region; its parts are the province-level extracts
 FRESH_FOR = 7 * 24 * 3600.0
 PUBLISH_EVERY = 2.0  # seconds between "new lines" events to the page
 MAX_TILES = 512
+# Version 2: lines cut to China (geometry as WKB).  Older files - the Overpass
+# version of this overlay, or lines not yet cut - are emptied and filled again.
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS provinces (region TEXT PRIMARY KEY, built_at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS lines (region TEXT NOT NULL, id INTEGER NOT NULL, tags TEXT NOT NULL, coords BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS lines (region TEXT NOT NULL, id INTEGER NOT NULL, tags TEXT NOT NULL, geom BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS lines_region ON lines(region);
 CREATE TABLE IF NOT EXISTS owned (region TEXT PRIMARY KEY);
 """
 
 
-def construction_rows(db: Path) -> list[tuple[int, dict, np.ndarray]]:
-    """Ways under construction in a filtered extract (extracts.filter_railways)."""
+def construction_rows(db: Path, china) -> list[tuple[int, dict, object]]:
+    """Railway lines under construction in a filtered extract (extracts.filter_railways),
+    cut to ``china`` (lon/lat): a province's extract also holds whole ways that cross
+    the border, and a margin around the province."""
     conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
     try:
         rows = conn.execute(
@@ -83,19 +88,33 @@ def construction_rows(db: Path) -> list[tuple[int, dict, np.ndarray]]:
         ).fetchall()
     finally:
         conn.close()
-    return [(way_id, json.loads(tags), np.frombuffer(blob, dtype=np.float64).reshape(-1, 2)) for way_id, tags, blob in rows]
+    shapely.prepare(china)
+    out = []
+    for way_id, tags, blob in rows:
+        coords = np.frombuffer(blob, dtype=np.float64).reshape(-1, 2)
+        if len(coords) < 2:
+            continue
+        line = LineString(coords)
+        if not china.contains(line):
+            line = line.intersection(china)
+            parts = [g for g in getattr(line, "geoms", [line]) if g.geom_type == "LineString" and g.length > 0]
+            if not parts:
+                continue
+            line = parts[0] if len(parts) == 1 else shapely.MultiLineString(parts)
+        out.append((way_id, json.loads(tags), line))
+    return out
 
 
 def _make_lines(rows) -> list[_Line]:
-    """(way id, tags, (lon, lat) array) -> lines ready for tiles: railway lines under
+    """(way id, tags, geometry in lon/lat) -> lines ready for tiles: railway lines under
     construction without ``service`` (the ones drawn below z9)."""
     lines = []
-    for way_id, tags, coords in rows:
+    for way_id, tags, geom in rows:
         cls = classify(tags)
-        if cls is None or cls.state != "construction" or cls.kind != "rail" or cls.service or len(coords) < 2:
+        if cls is None or cls.state != "construction" or cls.kind != "rail" or cls.service:
             continue
-        geom = LineString(to_mercator(np.asarray(coords, dtype=np.float64)))
-        if geom.length == 0:
+        geom = shapely.transform(geom, to_mercator)
+        if geom.is_empty or geom.length == 0:
             continue
         lines.append(_Line(way_id, geom, line_props(tags, cls), cls.minzoom, cls.labelzoom, speed_label(tags)))
     return lines
@@ -149,6 +168,7 @@ class ConstructionLines:
         on_question: Callable[[dict], None] = lambda question: None,
         planned_regions: Callable[[], set[str]] = set,
         view_center: Callable[[], tuple[float, float]] = lambda: (105.0, 35.0),
+        cells_busy: Callable[[], bool] = lambda: False,
     ) -> None:
         self.home = home
         self.extracts = extracts
@@ -159,6 +179,7 @@ class ConstructionLines:
         self.on_question = on_question
         self.planned_regions = planned_regions
         self.view_center = view_center
+        self.cells_busy = cells_busy
         self.version = 0
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
@@ -239,6 +260,14 @@ class ConstructionLines:
                 if not self.extracts.usable(region.id):
                     failed += 1
                     continue
+                if not self.extracts.fresh(region.id) and not self.extracts.busy(region.id):
+                    # Cell downloads come first: the next province is downloaded once they are done.
+                    while self.cells_busy() and not self._stopped(run):
+                        self._note(f"{label}：等方格下载完成后继续")
+                        run.cancel.wait(1.0)
+                    if self._stopped(run):
+                        break
+                    self._note(f"{label}：{region.name}")
                 try:
                     downloaded = self.extracts.ensure(
                         region.id, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}")
@@ -288,9 +317,10 @@ class ConstructionLines:
     def _load_region(self, region: str) -> None:
         """Take the province's lines under construction from its filtered extract."""
         db = self.extracts.db_path(region)
-        if self.home.blocked or not db.exists():
+        index = self.extracts._index
+        if self.home.blocked or not db.exists() or index is None or CHINA not in index.regions:
             return
-        rows = construction_rows(db)
+        rows = construction_rows(db, index.regions[CHINA].geometry)
         lines = _make_lines(rows)
         kept = {line.way_id for line in lines}
         now = time.time()
@@ -305,7 +335,7 @@ class ConstructionLines:
             conn.executemany(
                 "INSERT INTO lines VALUES (?, ?, ?, ?)",
                 [(region, way_id, json.dumps(tags, ensure_ascii=False, separators=(",", ":")),
-                  coords.astype(np.float64).tobytes()) for way_id, tags, coords in rows if way_id in kept],
+                  shapely.to_wkb(geom)) for way_id, tags, geom in rows if way_id in kept],
             )
             conn.execute("INSERT OR REPLACE INTO provinces VALUES (?, ?)", (region, now))
             conn.execute("COMMIT")
@@ -397,9 +427,9 @@ class ConstructionLines:
             if conn is not None:
                 for region, built_at in conn.execute("SELECT region, built_at FROM provinces").fetchall():
                     rows = [
-                        (way_id, json.loads(tags), np.frombuffer(blob, dtype=np.float64).reshape(-1, 2))
+                        (way_id, json.loads(tags), shapely.from_wkb(blob))
                         for way_id, tags, blob in conn.execute(
-                            "SELECT id, tags, coords FROM lines WHERE region=?", (region,)
+                            "SELECT id, tags, geom FROM lines WHERE region=?", (region,)
                         )
                     ]
                     areas[region] = _make_area(region, built_at, _make_lines(rows))
@@ -500,6 +530,11 @@ class ConstructionLines:
         self.home.ensure_dir(self.home.cache_dir)
         conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
+        if conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            # Lines of an older version: fetched again.  Extracts still to be asked about stay listed.
+            conn.executescript("DROP TABLE IF EXISTS areas; DROP TABLE IF EXISTS lines; DROP TABLE IF EXISTS provinces;")
+            conn.executescript(SCHEMA)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.executescript(SCHEMA)
         self._conn = conn
         return conn

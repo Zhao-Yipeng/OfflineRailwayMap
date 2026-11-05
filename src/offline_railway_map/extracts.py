@@ -61,7 +61,6 @@ PARTIAL_KEPT_FOR = 24 * 3600.0  # an interrupted download is continued within th
 MAX_MB_PER_CELL = 250
 FAILED_PAUSE = 30 * 60.0  # after a failed download, cells use Overpass for this long
 RETRY_DELAYS = (5, 15, 45, 120)  # seconds before continuing a broken download
-DOWNLOADS_AT_ONCE = 2  # extracts downloaded at the same time (cells and the construction overlay together)
 MIN_SHARE = 0.005  # share of a cell a region must cover to be used for it
 SLIVER = 0.03  # degrees: leftovers narrower than about twice this are border slivers
 LINE_TYPES = frozenset({"rail", "narrow_gauge", "subway", "light_rail", "tram", "construction", "proposed", "disused"})
@@ -444,7 +443,6 @@ class ExtractStore:
         self._lock = threading.Lock()
         self._failed_until: dict[str, float] = {}
         self._stop = threading.Event()
-        self._download_slots = threading.BoundedSemaphore(DOWNLOADS_AT_ONCE)
         self._cell_used: set[str] = set()  # regions cell downloads used while the program runs
         # Hooks for the construction overlay (construction.py): a region was
         # filtered (by anyone), or cells are about to use a region.
@@ -604,15 +602,7 @@ class ExtractStore:
             self.home.ensure_dir(self.folder)
             pbf = self.folder / f"{_safe(rid)}.osm.pbf"
             if not pbf.exists():
-                if not self._download_slots.acquire(blocking=False):
-                    report(f"等待下载地区数据包「{name}」（同时最多下载 {DOWNLOADS_AT_ONCE} 个）", 0.0)
-                    while not self._download_slots.acquire(timeout=0.5):
-                        if stop.is_set():
-                            raise Cancelled()
-                try:
-                    self._download(region, pbf, name, report, received, stop)
-                finally:
-                    self._download_slots.release()
+                self._download(region, pbf, name, report, received, stop)
             report(f"筛选地区数据包「{name}」中的铁路", 0.0)
             filter_railways(
                 pbf, self.db_path(rid), stop,

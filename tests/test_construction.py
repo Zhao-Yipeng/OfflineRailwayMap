@@ -41,6 +41,8 @@ def write_pbf(path: Path) -> None:
         w.add_node(Node(id=22, location=(116.5, 40.0)))
         w.add_node(Node(id=31, location=(116.40, 39.90)))
         w.add_node(Node(id=32, location=(116.41, 39.905)))
+        w.add_node(Node(id=41, location=(133.0, 45.0)))
+        w.add_node(Node(id=42, location=(137.0, 45.0)))
         # a high-speed line under construction: drawn at every zoom
         w.add_way(Way(id=100, nodes=[1, 2, 3], tags={"railway": "construction", "construction": "rail",
                                                      "usage": "main", "maxspeed": "350", "name": "在建高铁"}))
@@ -50,6 +52,9 @@ def write_pbf(path: Path) -> None:
                                                     "service": "siding"}))
         # built lines come from the ORM tiles
         w.add_way(Way(id=102, nodes=[21, 22], tags={"railway": "rail", "usage": "main", "maxspeed": "200"}))
+        # crosses the border of China (lon 135 in index_json): only the part inside is drawn
+        w.add_way(Way(id=104, nodes=[41, 42], tags={"railway": "construction", "construction": "rail",
+                                                    "usage": "main", "maxspeed": "250"}))
 
 
 class Geofabrik:
@@ -110,11 +115,13 @@ def stop_everything():
         lines.close()
 
 
-def make(home, geofabrik, switch=None, coverage=None, planned=frozenset(), center=(116.4, 39.9)) -> ConstructionLines:
+def make(home, geofabrik, switch=None, coverage=None, planned=frozenset(), center=(116.4, 39.9),
+         cells_busy=lambda: False) -> ConstructionLines:
     store = ExtractStore(home, requests.Session(), index_url=geofabrik.server.url + "/index-v1.json")
     lines = ConstructionLines(
         home, store, coverage or CellCoverage(), switch or Switch(),
         on_change=lambda version: None, planned_regions=lambda: set(planned), view_center=lambda: center,
+        cells_busy=cells_busy,
     )
     lines.questions = []
     lines.on_question = lines.questions.append
@@ -160,10 +167,19 @@ def test_switching_on_downloads_china_once_and_draws_its_lines_at_every_zoom(hom
     assert sorted(question["regions"]) == sorted(PROVINCES) and question["bytes"] > 0
     for z in range(2, 15):
         data = lines.tile(*tile_at(z))
-        assert ids(data) == {100}, f"z{z}: the line under construction, nothing else"
-        feature = mapbox_vector_tile.decode(data)["rail"]["features"][0]
+        found = ids(data)
+        assert 100 in found and not found & {101, 102, 103}, f"z{z}: the line under construction, nothing else"
+        feature = next(f for f in mapbox_vector_tile.decode(data)["rail"]["features"] if f["id"] == 100)
         assert feature["properties"]["st"] == "c" and feature["properties"]["sp"] == 350, "coloured by its speed"
     assert lines.tile(*tile_at(6, lon=10.0, lat=50.0)) == b"", "outside China: nothing"
+
+
+def test_only_the_part_inside_china_is_drawn(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    wait_for_question(lines)
+    assert 104 in ids(lines.tile(*tile_at(9, lon=134.0, lat=45.0))), "inside China"
+    assert ids(lines.tile(*tile_at(9, lon=136.0, lat=45.0))) == set(), "across the border: cut off"
 
 
 def test_extracts_already_on_disk_are_shared_and_not_asked_about(home, geofabrik):
@@ -184,7 +200,7 @@ def test_deleting_removes_only_what_was_downloaded_for_this(home, geofabrik):
     assert result["deleted"] == len(PROVINCES) - 1 and result["bytes"] > 0
     assert lines.extracts.db_path("beijing").exists(), "the cells' extract stays"
     assert not any(lines.extracts.db_path(p).exists() for p in PROVINCES if p != "beijing")
-    assert ids(lines.tile(*tile_at(9))) == {100}, "the lines are kept"
+    assert 100 in ids(lines.tile(*tile_at(9))), "the lines are kept"
     assert lines.question() is None
 
 
@@ -264,6 +280,37 @@ def test_switching_off_stops_and_asks_about_what_was_downloaded(home, geofabrik)
     assert len(geofabrik.downloaded()) <= 2, "no further provinces after switching off"
 
 
+def test_cell_downloads_go_first(home, geofabrik):
+    busy = Switch(True)
+    lines = make(home, geofabrik, cells_busy=busy)
+    lines.settings_changed()
+    time.sleep(1.0)
+    assert geofabrik.downloaded() == set(), "nothing while cells are being downloaded"
+    busy.on = False
+    wait_for_question(lines)
+    assert geofabrik.downloaded() == set(PROVINCES)
+
+
+def test_lines_of_an_older_version_are_fetched_again(home, geofabrik):
+    """The Overpass version of this overlay left another table layout behind."""
+    import sqlite3
+
+    home.ensure_dir(home.cache_dir)
+    old = sqlite3.connect(home.cache_dir / "construction.sqlite")
+    old.executescript(
+        "CREATE TABLE areas (z INTEGER, x INTEGER, y INTEGER, fetched_at REAL NOT NULL, PRIMARY KEY (z, x, y));"
+        "CREATE TABLE lines (z INTEGER, x INTEGER, y INTEGER, id INTEGER, tags TEXT, coords BLOB);"
+        "INSERT INTO areas VALUES (3, 6, 3, 1.0);"
+    )
+    old.commit()
+    old.close()
+    lines = make(home, geofabrik)
+    assert lines.tile(*tile_at(6)) == b""
+    lines.settings_changed()
+    wait_for_question(lines)
+    assert 100 in ids(lines.tile(*tile_at(6)))
+
+
 def test_inside_cached_cells_the_cell_draws_its_own_lines(home, geofabrik):
     coverage = CellCoverage()
     lines = make(home, geofabrik, coverage=coverage)
@@ -272,7 +319,7 @@ def test_inside_cached_cells_the_cell_draws_its_own_lines(home, geofabrik):
     z, x, y = tile_at(10)
     coverage.replace({(x >> 2, y >> 2)})
     assert lines.tile(z, x, y) == b""
-    assert ids(lines.tile(*tile_at(6))) == {100}, "lower zooms keep the overlay (drawn below the cached lines)"
+    assert 100 in ids(lines.tile(*tile_at(6))), "lower zooms keep the overlay (drawn below the cached lines)"
 
 
 def test_switching_on_again_refreshes_old_lines_from_extracts_on_disk(home, geofabrik, monkeypatch):
@@ -296,4 +343,7 @@ def test_a_province_filtered_for_cells_updates_its_lines(home, geofabrik):
     lines.decide(delete=True)
     before = lines._built_at("tianjin")
     lines.extracts.cell_elements(210, 97, ["tianjin"], threading.Event(), lambda *a: None, lambda n: None)
+    end = time.time() + 10  # updated in the background, after the cells got their data
+    while lines._built_at("tianjin") <= before and time.time() < end:
+        time.sleep(0.05)
     assert lines._built_at("tianjin") > before

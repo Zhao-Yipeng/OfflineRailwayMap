@@ -116,6 +116,7 @@ class AppCore:
             on_question=lambda question: self.events.publish("construction-question", question),
             planned_regions=self.downloader.planned_regions,
             view_center=lambda: self.settings.initial_view()[:2],
+            cells_busy=lambda: self.downloader.busy,
         )
         self.downloader.on_install(lambda cid, cell_dir: install_ancestors(cell_dir, cid, self.lowzoom))
         self.cells.on_queue(self.downloader.queue_changed)

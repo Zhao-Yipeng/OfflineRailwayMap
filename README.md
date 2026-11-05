@@ -42,7 +42,7 @@
 | OpenRailwayMap 瓦片与搜索 API | 未缓存区域的速度图层、车站搜索 | 只限免费、公开的非商业程序使用；必须带本程序的 User-Agent；只按需请求；收到 429 停止访问。<https://wiki.openstreetmap.org/wiki/OpenRailwayMap/API> |
 | OpenFreeMap 矢量瓦片 | 未缓存区域的灰色底图（按离线底图的配色显示） | 免费、不限访问量、不需要注册；必须署名。只按视野请求，按 HTTP 缓存头缓存（最多 7 天）。<https://openfreemap.org/tos/> |
 | Overpass API | 下载方格的铁路数据（少于 6 格时） | 按每台服务器允许的名额并发，记录每天的用量。 |
-| Geofabrik 地区数据包 | 下载方格的铁路数据（6 格及以上时）；「永远显示在建线路」的中国各省数据 | 免费下载，不要短时间内反复下载同一文件。同一地区只下载一次，同时最多下载 2 个，筛出的铁路保留 7 天。<https://download.geofabrik.de/technical.html> |
+| Geofabrik 地区数据包 | 下载方格的铁路数据（6 格及以上时）；「永远显示在建线路」的中国各省数据 | 免费下载，不要短时间内反复下载同一文件。同一地区只下载一次，筛出的铁路保留 7 天。<https://download.geofabrik.de/technical.html> |
 | Protomaps 每日构建 | 离线底图 | 按方格一次性读取需要的部分。<https://docs.protomaps.com/basemaps/downloads> |
 | Nominatim | 地名搜索 | 每秒最多一次，只在按回车时搜索。<https://operations.osmfoundation.org/policies/nominatim/> |
 

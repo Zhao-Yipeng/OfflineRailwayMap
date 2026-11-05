@@ -115,7 +115,7 @@ export function refreshRailLayers(map, newVersion) {
   if (construction) construction.setTiles(constructionUrl());
 }
 
-// Lines under construction in uncached areas, at every zoom (setting 「永远显示在建线路」,
+// Lines under construction in China, at every zoom (setting 「永远显示在建线路」,
 // SPEC §7.9).  Drawn like cached lines, below them and below the ORM tiles; the
 // tiles are empty inside cached cells.  Hidden layers request no tiles.
 const CONSTRUCTION_LAYERS = ['construction-casing', 'construction-lines'];
