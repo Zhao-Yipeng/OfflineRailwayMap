@@ -16,7 +16,41 @@ function row(label, value) {
   return el('tr', {}, el('th', {}, label), el('td', {}, String(value)));
 }
 
-function describe(line, railAt) {
+// A line is often several OSM ways where it is clicked: one per track of a
+// double-track line, or split at a bridge or a speed change.  Ways that are
+// the same line (name, number, kind, speed) are one entry; the details say
+// how many ways there are and which tags differ, and can show each of them.
+function lineKey(line) {
+  const t = line.tags || {};
+  return [line.state, line.kind, t.name || '', t.ref || '', line.service || '', line.speedLabel || ''].join('|');
+}
+
+function groupLines(lines) {
+  const groups = new Map();
+  for (const line of lines) {
+    const key = lineKey(line);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(line);
+  }
+  return [...groups.values()];
+}
+
+function segments(group, index, onSwitch) {
+  const keys = [...new Set(group.flatMap((l) => Object.keys(l.tags || {})))].sort();
+  const differing = keys.filter((k) => new Set(group.map((l) => (l.tags || {})[k] ?? '')).size > 1);
+  return el('div', { class: 'details-segments' },
+    el('div', {}, `此处同一线路有 ${group.length} 段 OSM 线路（常见于上下行两条股道，或在桥梁、限速变化处分段）`
+      + (differing.length ? '，不同的标签：' : '，标签相同。')),
+    differing.length ? el('table', {}, differing.map((k) => el('tr', {}, el('th', {}, k),
+      el('td', {}, group.map((l) => (l.tags || {})[k] ?? '（无）').join(' / '))))) : null,
+    el('div', { class: 'segment-buttons' }, group.map((l, i) => el('button', {
+      type: 'button', class: i === index ? 'link current' : 'link', disabled: i === index,
+      onclick: () => onSwitch(i),
+    }, `第 ${i + 1} 段`))),
+  );
+}
+
+function describe(line, railAt, group = [line], index = 0, onSwitch = null) {
   const t = line.tags;
   const type = [STATES[line.state] || '', KINDS[line.kind] || line.kind || ''].join('');
   const speed = line.speedLabel
@@ -38,6 +72,7 @@ function describe(line, railAt) {
       ...others.map((k) => row(k, t[k])),
       railAt ? row('数据下载日期', formatDate(railAt)) : row('数据来源', '联网查询（未缓存区域）'),
     ].filter(Boolean)),
+    group.length > 1 && onSwitch ? segments(group, index, onSwitch) : null,
     el('details', {}, el('summary', {}, `全部标签（${Object.keys(t).length}）`), el('table', { class: 'all-tags' }, all)),
     el('button', { type: 'button', class: 'link', onclick: () => openExternal(`https://www.openstreetmap.org/way/${line.id}`) },
       '在 openstreetmap.org 查看'),
@@ -45,24 +80,25 @@ function describe(line, railAt) {
 }
 
 // One line of the chooser: what the line is, then what tells it apart from its neighbours.
-function lineLabel(line) {
+function lineLabel(line, withTrack = true) {
   const t = line.tags || {};
   const type = [STATES[line.state] || '', KINDS[line.kind] || ''].join('');
   const name = t.name || t.ref || type || `线路 ${line.id}`;
   const extra = [
     t.name && t.ref ? t.ref : null,
     SERVICES[line.service] || null,
-    t['railway:track_ref'] ? `${t['railway:track_ref']} 道` : null,
+    withTrack && t['railway:track_ref'] ? `${t['railway:track_ref']} 道` : null,
     line.speedLabel ? `${line.speedLabel} km/h` : '无速度信息',
   ].filter(Boolean);
   return `${name} · ${extra.join(' · ')}`;
 }
 
-function chooser(lines, pick) {
+function chooser(groups, pick) {
   return el('div', { class: 'details' },
-    el('div', { class: 'details-title' }, `此处有 ${lines.length} 条线路`),
-    ...lines.map((line) => el('button', { type: 'button', class: 'result', onclick: () => pick(line) },
-      el('span', { class: 'result-name' }, line.label || `线路 ${line.id}`))));
+    el('div', { class: 'details-title' }, `此处有 ${groups.length} 条线路`),
+    ...groups.map((group) => el('button', { type: 'button', class: 'result', onclick: () => pick(group) },
+      el('span', { class: 'result-name' },
+        group.length > 1 ? `${lineLabel(group[0], false)}（${group.length} 段）` : lineLabel(group[0])))));
 }
 
 export function setupDetails(map, cells) {
@@ -76,6 +112,15 @@ export function setupDetails(map, cells) {
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && popup) { popup.remove(); popup = null; }
   });
+
+  // One line (a group of ways, see lineKey): its details, with a switch between its ways.
+  const showGroup = (lngLat, group, railAt, index = 0) => show(lngLat,
+    describe(group[index], railAt, group, index, (i) => showGroup(lngLat, group, railAt, i)));
+  const showLines = (lngLat, lines, railAt) => {
+    const groups = groupLines(lines);
+    if (groups.length === 1) showGroup(lngLat, groups[0], railAt);
+    else show(lngLat, chooser(groups, (group) => showGroup(lngLat, group, railAt)));
+  };
 
   map.on('click', async (e) => {
     if (cells.mode !== 'browse') return;
@@ -99,12 +144,10 @@ export function setupDetails(map, cells) {
         if (seen.size === 1) await load([...seen.keys()][0]);
         else {
           // Local and fast: fetch every candidate so the list can name them.
-          const infos = await Promise.all([...seen.keys()].slice(0, 20)
-            .map((id) => api.get(`/api/details?cell=${cid}&way=${id}`).catch(() => null)));
-          const lines = infos.filter(Boolean).map((info) => ({ id: info.id, label: lineLabel(info), info }));
-          if (request !== pending || !lines.length) return;
-          if (lines.length === 1) show(e.lngLat, describe(lines[0].info, lines[0].info.railAt));
-          else show(e.lngLat, chooser(lines, (line) => show(e.lngLat, describe(line.info, line.info.railAt))));
+          const infos = (await Promise.all([...seen.keys()].slice(0, 20)
+            .map((id) => api.get(`/api/details?cell=${cid}&way=${id}`).catch(() => null)))).filter(Boolean);
+          if (request !== pending || !infos.length) return;
+          showLines(e.lngLat, infos, infos[0].railAt);
         }
         return;
       }
@@ -118,9 +161,7 @@ export function setupDetails(map, cells) {
       const radius = Math.min(50, Math.max(5, metersPerPixel * 10));
       const result = await api.get(`/api/details/online?lon=${e.lngLat.lng}&lat=${e.lngLat.lat}&radius=${radius.toFixed(0)}`);
       if (request !== pending || !result.lines.length) return;
-      if (result.lines.length === 1) show(e.lngLat, describe(result.lines[0], null));
-      else show(e.lngLat, chooser(result.lines.map((l) => ({ id: l.id, label: lineLabel(l), line: l })),
-        (pick) => show(e.lngLat, describe(result.lines.find((l) => l.id === pick.id), null))));
+      showLines(e.lngLat, result.lines, null);
     } catch (err) {
       if (request === pending) toast(err.message, 'error');
     }

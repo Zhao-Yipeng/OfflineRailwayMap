@@ -74,7 +74,7 @@ python -m offline_railway_map --serve   # 只启动本地服务，在浏览器�
 python -m pytest                        # 单元测试和集成测试
 ```
 
-- 端到端测试（需要 Node.js 和 Playwright）：`PYTHON=<python 路径> node tests/e2e/smoke.cjs`，以及同目录下的 `cells.cjs`、`features.cjs`、`online.cjs`、`download.cjs`（后两个会访问真实服务器；`download.cjs` 可以用环境变量 `E2E_SETTINGS` 传入 settings.ini 内容，例如把 Overpass 指向本地替身服务器）。
+- 端到端测试（需要 Node.js 和 Playwright）：`PYTHON=<python 路径> node tests/e2e/smoke.cjs`，以及同目录下的 `cells.cjs`、`features.cjs`、`details.cjs`、`online.cjs`、`download.cjs`（后两个会访问真实服务器；`download.cjs` 可以用环境变量 `E2E_SETTINGS` 传入 settings.ini 内容，例如把 Overpass 指向本地替身服务器）。
 - Qt 窗口冒烟测试：`QT_QPA_PLATFORM=offscreen python tests/qt_smoke.py`。
 - 第三方前端资源：`python tools/vendor_assets.py`（固定版本并校验哈希）；离线底图样式由 `tools/build_basemap_style.mjs` 生成。
 - 打包（Windows）：`pyinstaller packaging/OfflineRailwayMap.spec --noconfirm`，输出在 `dist\OfflineRailwayMap\`。必须使用单文件夹模式。

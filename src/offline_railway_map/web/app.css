@@ -124,7 +124,7 @@ button.result:hover { background: #f3f4f6; }
 .result-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-kind { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
-.details-popup .maplibregl-popup-content { padding: 10px 12px; font-size: 12px; max-height: 60vh; overflow: auto; }
+.details-popup .maplibregl-popup-content { padding: 10px 12px; font-size: 12px; max-height: 45vh; overflow: auto; }
 .details-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
 .details table { border-collapse: collapse; width: 100%; }
 .details th { text-align: left; color: var(--muted); font-weight: normal; padding: 1px 8px 1px 0; white-space: nowrap; vertical-align: top; }
@@ -143,6 +143,10 @@ button.result:hover { background: #f3f4f6; }
 .settings label { display: flex; flex-direction: column; gap: 4px; }
 .settings label.inline { flex-direction: row; align-items: center; gap: 6px; }
 .settings small { color: var(--muted); }
+.details-segments { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--panel-border); font-size: 12px; }
+.details-segments table { margin: 4px 0; }
+.details-segments .segment-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+.details-segments .link.current { color: var(--muted); text-decoration: none; cursor: default; }
 .settings .option { display: flex; flex-direction: column; gap: 2px; }
 .settings .option small { padding-left: 22px; }
 .settings textarea, .settings input[type=url], .settings input[type=number], .settings select { font: inherit; padding: 4px 6px; }
