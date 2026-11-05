@@ -111,6 +111,8 @@ class RegionIndex:
                 parent.children.append(region)
         self._list = list(self.regions.values())
         self._tree = shapely.STRtree([r.geometry for r in self._list])
+        self._contains: dict[tuple[str, str], bool] = {}
+        self._groups: dict[str, bool] = {}
 
     @classmethod
     def from_json(cls, data: dict) -> RegionIndex:
@@ -122,14 +124,50 @@ class RegionIndex:
         hits = self._tree.query(area, predicate="intersects")
         return [self._list[i] for i in hits]
 
+    def around(self, outer: Region, inner: Region) -> bool:
+        """True if ``outer`` holds ``inner``: its parent, grandparent ..., or a group of
+        regions like "us-northeast" or "dach" that covers (nearly) all of it."""
+        key = (outer.id, inner.id)
+        if key not in self._contains:
+            found, region, seen = False, inner, set()
+            while region is not None and region.parent and region.id not in seen:
+                seen.add(region.id)
+                if region.parent == outer.id:
+                    found = True
+                    break
+                region = self.regions.get(region.parent)
+            if not found and outer.geometry.area > inner.geometry.area and self.is_group(outer):
+                found = _shared_area(outer.geometry, inner.geometry) >= 0.9 * inner.geometry.area
+            self._contains[key] = found
+        return self._contains[key]
+
+    def is_group(self, region: Region) -> bool:
+        """True for a region made of other regions (Geofabrik's "dach", "us-northeast",
+        "britain-and-ireland" ...), as opposed to a country that merely surrounds a
+        small neighbour (Switzerland and Liechtenstein, Italy and San Marino)."""
+        if region.id not in self._groups:
+            members = []
+            for index in self._tree.query(region.geometry, predicate="intersects"):
+                other = self._list[int(index)]
+                if other is region or other.parent is None or other.geometry.area >= region.geometry.area:
+                    continue
+                if _shared_area(region.geometry, other.geometry) >= 0.9 * other.geometry.area:
+                    members.append(other.geometry)
+            covered = _shared_area(shapely.union_all(members), region.geometry) if members else 0.0
+            self._groups[region.id] = covered >= 0.6 * region.geometry.area
+        return self._groups[region.id]
+
     def most_specific(self, cx: int, cy: int) -> list[Region]:
         """Regions that together hold everything in the cell, as small as possible.
 
-        The smallest regions come first; a bigger one (a country around its
-        provinces, or a group of countries like "dach" or "alps") is only
-        used for what the smaller ones leave, and not for slivers along their
-        borders: the extracts keep whole ways, so a railway crossing a border
-        is in both neighbours.  Continents (no parent) are never used.
+        The smallest regions come first.  A bigger region around ones already
+        chosen (a country around its provinces, a group like "us-northeast"
+        or "dach" around its countries) is not used: their own parts cover
+        its land, and what it has beyond them is sea or a border strip.  Any
+        other region is used for what the smaller ones leave, but not for
+        slivers along their borders: the extracts keep whole ways, so a
+        railway crossing a border is in both neighbours.  Continents (no
+        parent) are never used.
         """
         west, south, east, north = cell_bounds(cx, cy)
         cell = box(west, south, east, north)
@@ -142,23 +180,50 @@ class RegionIndex:
             if part.area >= least:
                 candidates.append((region.geometry.area, region.id, region, part))
         candidates.sort(key=lambda item: item[:2])
-        chosen: list[Region] = []
+        chosen: list[tuple[Region, object]] = []
         covered = None
         for _, _, region, part in candidates:
+            if any(other.intersects(part) and self.around(region, kept) for kept, other in chosen):
+                continue
             new = part if covered is None else part.difference(covered)
             if new.area < least:
                 continue
             if new.area < part.area / 2 and new.buffer(-SLIVER).is_empty:
                 continue  # mostly covered already, and the rest is a thin strip
-            chosen.append(region)
+            chosen.append((region, part))
             covered = part if covered is None else covered.union(part)
-        return chosen
+        return [region for region, _part in chosen]
 
 
 def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Region], int | None]) -> dict[str, list[str]]:
     """Cell id -> region ids to read it from; cells left out use Overpass."""
     needs: dict[str, list[Region]] = {cell_id(x, y): index.most_specific(x, y) for x, y in cells}
     needs = {cid: regions for cid, regions in needs.items() if regions}
+
+    def mb(region: Region) -> float | None:
+        size = size_of(region)
+        return None if size is None else size / (1024 * 1024)
+
+    def cells_using(ids: set[str]) -> int:
+        return sum(1 for regions in needs.values() if any(r.id in ids for r in regions))
+
+    # A region much bigger than the cells it serves (an entire neighbouring
+    # country for one border cell) is not worth it: those cells use Overpass.
+    # Leaving them out can make other regions serve fewer cells, so repeat.
+    while True:
+        counts: dict[str, int] = {}
+        for regions in needs.values():
+            for region in regions:
+                counts[region.id] = counts.get(region.id, 0) + 1
+        too_big = set()
+        for rid, count in counts.items():
+            size = mb(index.regions[rid])
+            if size is not None and size / count > MAX_MB_PER_CELL:
+                too_big.add(rid)
+        if not too_big:
+            break
+        needs = {cid: regions for cid, regions in needs.items() if not any(r.id in too_big for r in regions)}
+
     # A parent (one download) replaces its children when it is not much bigger
     # than the children needed anyway; without sizes, when half of them are needed.
     def worth_parent(parent: Region, kids: list[Region]) -> bool:
@@ -167,6 +232,8 @@ def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Re
         parent_size = size_of(parent)
         kid_sizes = [size_of(k) for k in kids]
         if parent_size is not None and None not in kid_sizes:
+            if parent_size / (1024 * 1024) / cells_using({k.id for k in kids}) > MAX_MB_PER_CELL:
+                return False
             return parent_size <= 1.25 * sum(kid_sizes)
         return len(kids) * 2 >= len(parent.children)
 
@@ -174,7 +241,8 @@ def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Re
     while changed:
         changed = False
         used = {r.id: r for regions in needs.values() for r in regions}
-        for parent in {index.regions[r.parent] for r in used.values() if r.parent in index.regions}:
+        parents = {index.regions[r.parent] for r in used.values() if r.parent in index.regions}
+        for parent in sorted(parents, key=lambda region: region.id):
             if parent.parent is None:  # continents are too big
                 continue
             kids = [k for k in parent.children if k.id in used]
@@ -185,17 +253,7 @@ def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Re
                         needs[cid] = [r for r in regions if r.id not in kid_ids] + ([parent] if parent not in regions else [])
                 changed = True
                 break
-    # A region much bigger than what it is used for: those cells use Overpass.
-    serves: dict[str, int] = {}
-    for regions in needs.values():
-        for region in regions:
-            serves[region.id] = serves.get(region.id, 0) + 1
-    too_big = set()
-    for rid, count in serves.items():
-        size = size_of(index.regions[rid])
-        if size is not None and size / (1024 * 1024) / count > MAX_MB_PER_CELL:
-            too_big.add(rid)
-    return {cid: [r.id for r in regions] for cid, regions in needs.items() if not any(r.id in too_big for r in regions)}
+    return {cid: [r.id for r in regions] for cid, regions in needs.items()}
 
 
 # -- filtering ---------------------------------------------------------------------------
@@ -651,6 +709,13 @@ class ExtractStore:
     def forget(self) -> None:
         """After 「清空缓存」: nothing is known about local files any more."""
         self._failed_until.clear()
+
+
+def _shared_area(a, b) -> float:
+    try:
+        return a.intersection(b).area
+    except shapely.errors.GEOSException:
+        return 0.0
 
 
 def _polygonal(geometry):

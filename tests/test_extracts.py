@@ -173,6 +173,43 @@ def test_a_region_polygon_that_crosses_itself_is_repaired():
     assert [r.id for r in index.most_specific(210, 97)] == ["anhui"]
 
 
+def test_sea_around_provinces_or_states_does_not_bring_in_the_country_or_group():
+    """Seen in the real index: China's, Japan's and "us-northeast"'s polygons reach
+    further into the sea than their parts, so coastal cells picked them as well."""
+    west, south, east, north = cell_bounds(210, 97)
+    mid = (west + east) / 2
+    index = RegionIndex.from_json({"type": "FeatureCollection", "features": [
+        feature("asia", None, square(60, -10, 150, 60), "https://x/asia.osm.pbf"),
+        # the country and the group reach 0.4° (about 40 km) further east, into the sea
+        feature("china", "asia", square(100, 30, east + 0.4, 45), "https://x/china.osm.pbf"),
+        feature("hebei", "china", square(100, 30, mid, 45), "https://x/hebei.osm.pbf"),
+        feature("tianjin", "china", square(mid, 30, east - 0.4, 45), "https://x/tianjin.osm.pbf"),
+        feature("north-china", "asia", square(99, 29, east + 0.4, 46), "https://x/north-china.osm.pbf"),
+    ]})
+    assert sorted(r.id for r in index.most_specific(210, 97)) == ["hebei", "tianjin"]
+
+
+def test_a_country_around_a_small_neighbour_is_still_downloaded():
+    """Geofabrik's Switzerland surrounds Liechtenstein: both are needed for that cell."""
+    west, south, east, north = cell_bounds(210, 97)
+    index = RegionIndex.from_json({"type": "FeatureCollection", "features": [
+        feature("europe", None, square(60, -10, 150, 60), "https://x/europe.osm.pbf"),
+        feature("switzerland", "europe", square(west - 3, south - 3, east + 3, north + 3), "https://x/ch.osm.pbf"),
+        feature("liechtenstein", "europe", square(west + 0.2, south + 0.2, west + 0.5, south + 0.5),
+                "https://x/li.osm.pbf"),
+    ]})
+    assert sorted(r.id for r in index.most_specific(210, 97)) == ["liechtenstein", "switzerland"]
+
+
+def test_too_big_regions_are_left_out_until_nothing_changes():
+    """A region left with fewer cells after another one was left out is checked again."""
+    index = RegionIndex.from_json(index_json("https://x"))
+    sizes = {"beijing": 30e6, "tianjin": 150e6, "east1": 150e6, "china": 9000e6}
+    # tianjin serves 210-97 and 211-97 (75 MB each); 211-97 also needs east1 (150 MB for one cell)
+    result = plan(index, [(210, 97), (211, 97)], lambda region: sizes.get(region.id))
+    assert result == {}, "without 211-97, tianjin is 150 MB for one cell"
+
+
 def test_continents_are_never_downloaded():
     index = RegionIndex.from_json(index_json("https://x"))
     # 20, 20 is outside every country: nothing to download
