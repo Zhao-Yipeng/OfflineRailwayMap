@@ -542,3 +542,74 @@ def test_switching_off_does_not_stop_a_download_cells_wait_for(home, geofabrik):
     assert lines.extracts.db_path("beijing").exists(), "the cells got it"
     assert geofabrik.downloads("beijing") == 1
     assert wait_for_question(lines) is None, "the cells use it: not asked about"
+
+
+# -- switching on again: old lines -------------------------------------------------------------------
+
+
+def test_switching_on_again_downloads_nothing_to_renew_old_lines(home, geofabrik, monkeypatch):
+    """Lines older than 7 days are read again only from extracts on hand: without one the
+    old lines stay.  Provinces never done are still done (and downloaded if need be)."""
+    for name in PROVINCES:
+        geofabrik.slow[name] = 0.4
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch)
+    lines.settings_changed()
+    assert wait_until(lambda: sum(lines._built_at(p) > 0 for p in PROVINCES) >= 2)
+    switch.on = False
+    lines.settings_changed()
+    wait_for_question(lines)
+    lines.decide(delete=True)  # what was downloaded so far is gone
+    done = {p for p in PROVINCES if lines._built_at(p) > 0}
+    assert 2 <= len(done) < len(PROVINCES)
+    read = {p: lines._built_at(p) for p in done}
+    before = {p: geofabrik.downloads(p) for p in PROVINCES}
+    monkeypatch.setattr(construction, "FRESH_FOR", 0.0)  # every province's lines are old now
+    switch.on = True
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    for p in done:
+        assert geofabrik.downloads(p) == before[p], f"{p}: no extract on hand: not downloaded again"
+        assert lines._built_at(p) == read[p], f"{p}: the old lines stay"
+    assert all(lines._built_at(p) > 0 for p in set(PROVINCES) - done), "the others are done now"
+    assert sorted(question["regions"]) == sorted(set(PROVINCES) - done)
+    assert 100 in ids(lines.tile(*tile_at(6)))
+
+
+def test_switching_on_again_renews_old_lines_from_all_of_china_on_hand(home, geofabrik, monkeypatch):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    wait_for_question(lines)
+    lines.decide(delete=True)
+    for_cells(lines, ["china"])  # cells of many provinces, later
+    assert wait_until(lambda: lines._built_at("china") > 0)
+    read = lines._built_at("china")
+    monkeypatch.setattr(construction, "FRESH_FOR", 0.0)
+    lines.settings_changed()
+    assert wait_for_question(lines) is None
+    assert lines._built_at("china") > read, "read again from all of China's extract"
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES) and geofabrik.downloads("china") == 1
+
+
+def test_a_download_started_for_the_overlay_is_its_own_even_if_it_stopped_waiting(home, geofabrik):
+    """Switched off just as a province arrives, too late to stop it: it still counts as
+    downloaded for the overlay, so the question covers it."""
+    from offline_railway_map import extracts as extracts_module
+
+    geofabrik.slow["beijing"] = 1.0
+    lines = make(home, geofabrik)
+    cancel = threading.Event()
+
+    def overlay_waits():
+        try:
+            lines.extracts.ensure("beijing", cancel, lambda *a, **k: None)
+        except extracts_module.Cancelled:
+            pass
+
+    waiting = threading.Thread(target=overlay_waits)
+    waiting.start()
+    time.sleep(0.2)
+    cancel.set()  # the overlay stops waiting; the download goes on (nobody stops it here)
+    waiting.join(5)
+    assert wait_until(lambda: lines.extracts.fresh("beijing"))
+    assert lines.question()["regions"] == ["beijing"]

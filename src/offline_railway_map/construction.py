@@ -24,9 +24,10 @@ downloaded.
   nothing else, are deleted now or kept for 7 days like other extracts.
   Extracts that cells used, or that waiting cells may read, are not among
   them.  Unanswered, the question comes back at the next start.
-* A province's lines count as current for ``FRESH_FOR`` (7 days); switching
-  the setting on again refreshes older ones, and whenever China or a
-  province is filtered for cells, its lines are updated as well.
+* A province's lines count as current for ``FRESH_FOR`` (7 days).  Switching
+  the setting on again reads older ones again from extracts on hand, never
+  downloading for that (without one, the old lines stay), and whenever China
+  or a province is filtered for cells, its lines are updated as well.
 * Vector tiles are made on request; inside cached cells (z >= 8) they are
   empty: a cached cell draws its own lines.
 """
@@ -74,6 +75,7 @@ FRESH_FOR = 7 * 24 * 3600.0
 PUBLISH_EVERY = 2.0  # seconds between "new lines" events to the page
 MAX_TILES = 512
 INSIDE_MARGIN = 0.01  # degrees (about 1 km): "inside an extract's borders" keeps this far from them
+ABANDON_WAIT = 10.0  # seconds: switched off, how long to wait for a stopped download to settle
 # Version 2: lines cut to China (geometry as WKB).  Older files - the Overpass
 # version of this overlay, or lines not yet cut - are emptied and filled again.
 # "provinces" holds the extracts read: provinces, or all of China ("china").
@@ -240,6 +242,7 @@ class ConstructionLines:
         self._unpublished = False
         extracts.on_filtered = self._filtered
         extracts.on_cell_use = self._cell_use
+        extracts.on_downloaded_for_overlay = self._own
 
     @property
     def path(self) -> Path:
@@ -248,7 +251,8 @@ class ConstructionLines:
     # -- switching on and off -------------------------------------------------------------
 
     def start(self) -> None:
-        """At program start: provinces still missing are fetched (switching on again refreshes old ones)."""
+        """At program start: provinces still missing are fetched (switching on again also
+        reads old lines again, from extracts on hand)."""
         if self.enabled():
             self._begin(refresh=False)
 
@@ -334,9 +338,18 @@ class ConstructionLines:
         All of China's extract, if cells downloaded it or are downloading it, serves every
         province at once.  Otherwise the province's own: used if it is on disk, shared if
         cells are downloading it, else downloaded once cell downloads are done.
+
+        Lines older than ``FRESH_FOR`` (switching on again) are only read again from an
+        extract on hand - all of China's as above, or the province's own on disk - and
+        never downloaded for that: without one, the old lines stay.
         """
         try:
             self._note(f"{label}：{region.name}")
+            if self._covered_at(region.id) > 0:
+                if not self._from_china(run, refresh, started) and not self._stopped(run) \
+                        and self.extracts.fresh(region.id):
+                    self._load_region(region.id, since=started)
+                return None if self._stopped(run) else True
             while True:
                 if self._from_china(run, refresh, started):
                     return True
@@ -350,24 +363,24 @@ class ConstructionLines:
                 self._note(f"{label}：等方格下载完成后继续")
                 run.cancel.wait(1.0)
             self._note(f"{label}：{region.name}")
-            downloaded = self.extracts.ensure(
-                region.id, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}")
-            )
+            # A download started here is recorded as this one's when it arrives (_own).
+            self.extracts.ensure(region.id, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}"))
         except extracts_module.Cancelled:
             if not run.quiet:
                 # Switched off: the province's download stops too, unless cells wait for it
-                # (closing or clearing stops every download anyway).
-                self.extracts.abandon(region.id)
+                # (closing or clearing stops every download anyway).  If it arrives all the
+                # same, its lines are taken, so that it need not be downloaded again.
+                job = self.extracts.abandon(region.id)
+                if job is not None and job.done.wait(ABANDON_WAIT) and job.error is None:
+                    self._load_region(region.id)
             return None
         except ExtractUnavailable as exc:
             log.warning("construction lines: %s", exc)
             return False
-        if downloaded:
-            self._own(region.id)  # even if stopped now: it was downloaded for this
-        if self._stopped(run):
+        if self.home.blocked:
             return None
-        self._load_region(region.id, since=started if refresh else 0.0)
-        return True
+        self._load_region(region.id, since=started if refresh else 0.0)  # also if switched off meanwhile
+        return None if self._stopped(run) else True
 
     def _from_china(self, run: _Run, refresh: bool, started: float) -> bool:
         """Read every province from all of China's extract if it is on disk or being
@@ -421,7 +434,7 @@ class ConstructionLines:
         about everything inside its borders, where a way it does not have no longer
         exists: older copies there (all of China's, a neighbouring province's margin)
         are dropped.  Lines read from this file already are kept, unless read before
-        ``since`` (switching on again refreshes them).
+        ``since`` (switching on again reads old lines again).
         """
         db = self.extracts.db_path(region)
         index = self.extracts._index
@@ -490,6 +503,7 @@ class ConstructionLines:
     # -- what was downloaded for this, and the question --------------------------------------
 
     def _own(self, region: str) -> None:
+        """A download started for this has arrived: it belongs to the question, unless cells use it."""
         with self._lock:
             if self.extracts.used_by_cells(region):
                 return  # cells use it too: a cell download like any other

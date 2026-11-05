@@ -466,9 +466,11 @@ class ExtractStore:
         self._stopping = False  # stop() in progress: jobs started meanwhile stop at once
         self._cell_used: set[str] = set()  # regions cell downloads used while the program runs
         # Hooks for the construction overlay (construction.py): a region was
-        # filtered (by anyone), or cells are about to use a region.
+        # filtered (by anyone), cells are about to use a region, or a download the
+        # overlay started has arrived (also if the overlay stopped waiting for it).
         self.on_filtered: Callable[[str], None] = lambda rid: None
         self.on_cell_use: Callable[[str], None] = lambda rid: None
+        self.on_downloaded_for_overlay: Callable[[str], None] = lambda rid: None
 
     @property
     def folder(self) -> Path:
@@ -576,14 +578,17 @@ class ExtractStore:
         """
         return self._ensure(rid, cancel, activity, lambda n: None, lambda f: None, for_overlay=True)
 
-    def abandon(self, rid: str) -> None:
+    def abandon(self, rid: str) -> _RegionJob | None:
         """The construction overlay was switched off: stop the region's download if the
-        overlay started it and nobody waits for it any more.  What arrived so far is
-        kept and continued next time (``PARTIAL_KEPT_FOR``)."""
+        overlay started it and nobody waits for it any more; that job, else None.  What
+        arrived so far is kept and continued next time (``PARTIAL_KEPT_FOR``).  A job past
+        its last check may still finish."""
         with self._lock:
             job = self._jobs.get(rid)
             if job is not None and job.for_overlay and not job.listeners:
                 job.stop.set()
+                return job
+            return None
 
     def share(self, rid: str, cancel: threading.Event, activity: Activity) -> bool:
         """Use the region if it is on disk, or once the download running for it is done;
@@ -667,6 +672,11 @@ class ExtractStore:
             )
             pbf.unlink(missing_ok=True)
             filtered = True
+            if job.for_overlay:
+                try:
+                    self.on_downloaded_for_overlay(rid)
+                except Exception:  # noqa: BLE001 - a listener must not break downloads
+                    log.exception("after downloading %s", rid)
         except Cancelled:  # closing, clearing, overlay switched off: not a failure of the region
             job.error = ExtractUnavailable(f"地区数据包「{name}」已停止")
         except Exception as exc:  # noqa: BLE001 - every cell waiting falls back to Overpass
