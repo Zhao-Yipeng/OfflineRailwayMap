@@ -12,6 +12,7 @@ checks that every file was closed: Windows cannot delete open files.
 from __future__ import annotations
 
 import http.client
+import json
 import tempfile
 import threading
 import time
@@ -29,6 +30,7 @@ from offline_railway_map.settings import Settings
 from pmtiles_writer import range_route, write_archive
 from railfixtures import overpass_json
 from test_basemap import cell_tiles
+from test_extracts import index_json, write_pbf
 from test_online_tiles import RED
 
 MVT = b"\x1a\x05fake!"
@@ -47,9 +49,15 @@ def snapshot(root: Path) -> dict[str, int]:
 
 
 @pytest.fixture
-def servers():
-    """Overpass, Protomaps, OpenFreeMap and ORM stand-ins in one server."""
+def servers(tmp_path_factory):
+    """Overpass, Protomaps, OpenFreeMap, ORM and Geofabrik stand-ins in one server."""
     server = FakeServer().start()
+    pbf = tmp_path_factory.mktemp("geofabrik") / "served.osm.pbf"
+    write_pbf(pbf)  # has a railway line under construction
+    extract = pbf.read_bytes()
+    server.routes["/index-v1.json"] = lambda r: (200, {}, json.dumps(index_json(server.url)).encode())
+    for name in ("west1", "west2", "beijing", "tianjin", "east1", "east2"):
+        server.routes[f"/{name}.osm.pbf"] = lambda r: (200, {}, extract)
     server.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
     server.routes["/basemap.pmtiles"] = range_route(write_archive(cell_tiles(max_zoom=10), max_zoom=10))
     server.routes["/planet"] = lambda r: (
@@ -86,6 +94,7 @@ class Run:
             OnlineSource("orm", "ORM 瓦片", servers.url + "/orm/{z}/{x}/{y}.png", 5.0, 2, 19),
         )
         self.core = AppCore(self.home, settings, hooks=RecordingHooks(), online_sources=sources)
+        self.core.extracts.index_url = servers.url + "/index-v1.json"
         self.core.overpass.min_interval = 0
         self.core.start()
         self.client = Client(self.core)
@@ -114,12 +123,16 @@ class Run:
         assert self.get("/api/search?q=%E7%AB%99") == 200  # 站
         assert self.get("/api/details?cell=210-97&way=1") in (200, 404)
 
-    def wait_for_construction_lines(self) -> None:
-        """「永远显示在建线路」: the overlay's data is fetched and kept in data\\cache."""
-        end = time.time() + 30
+    def wait_for_construction_lines(self, delete: bool) -> None:
+        """「永远显示在建线路」: China's extracts are downloaded, the lines kept in
+        data\\cache, and the question about the extracts answered."""
+        end = time.time() + 60
         while time.time() < end:
-            if self.get("/tiles/construction/6/52/24.mvt?v=1") == 200:  # z6: not masked by cached cells
+            status, result = self.client.get_json("/api/construction")
+            tile = self.get("/tiles/construction/6/52/24.mvt?v=1")  # z6: not masked by cached cells
+            if status == 200 and result["question"] and tile == 200:
                 assert (self.home.cache_dir / "construction.sqlite").exists()
+                assert self.client.post_json("/api/construction/decide", {"delete": delete})[0] == 200
                 return
             time.sleep(0.1)
         raise AssertionError("no construction lines")
@@ -161,7 +174,7 @@ def test_clearing_after_long_use_leaves_only_the_program(tmp_path, servers, monk
     assert run.client.post_json("/api/settings", {"showCachedOutline": False, "alwaysShowConstruction": True})[0] == 200
     run.download("210-97")
     run.browse()
-    run.wait_for_construction_lines()
+    run.wait_for_construction_lines(delete=False)  # the extracts stay for 7 days
     assert run.client.post_json("/api/view", {"lon": 116.4, "lat": 39.9, "zoom": 9})[0] == 200
     run.stop()
     assert (root / "data").is_dir()

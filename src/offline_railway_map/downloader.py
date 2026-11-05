@@ -111,6 +111,20 @@ class Downloader:
             thread.start()
             self._threads.append(thread)
 
+    def planned_regions(self) -> set[str]:
+        """Regions waiting cells may read: kept when the construction overlay deletes
+        what it downloaded for itself (construction.py), or they would be downloaded
+        again.  Every region a waiting cell touches counts (also for fewer than
+        EXTRACT_MIN_CELLS cells, which use regions already on disk)."""
+        pending = self.store.pending_cells()
+        if not pending or self.extracts is None:
+            return set()
+        try:
+            index = self.extracts.index()
+        except Exception:  # noqa: BLE001 - no index, no extracts in use
+            return set()
+        return {region.id for x, y in pending for region in index.most_specific(x, y)}
+
     def queue_changed(self) -> None:
         """Cells were added or removed: plan the data sources again, and get going."""
         with self._plan_lock:

@@ -104,13 +104,18 @@ class AppCore:
         self.basemap = BasemapFetcher(self.http.session, self.basemap_selector, lambda: self.settings.basemap_maxzoom)
         self.overpass = OverpassClient(self.http.session, lambda: list(self.settings.overpass_endpoints), self.store)
         self.extracts = ExtractStore(home, self.http.session)
-        self.construction = ConstructionLines(
-            home, self.overpass, self.coverage, lambda: self.settings.always_show_construction, self.status,
-            on_change=lambda version: self.events.publish("construction", {"version": version}),
-        )
         self.downloader = Downloader(
             home, self.store, self.cells, self.overpass, self.rail, self.status, basemap=self.basemap,
             extract_store=self.extracts,
+        )
+        # Shares the extracts with cell downloads (SPEC §7.9): whatever is there or
+        # being downloaded is used by both.
+        self.construction = ConstructionLines(
+            home, self.extracts, self.coverage, lambda: self.settings.always_show_construction, self.status,
+            on_change=lambda version: self.events.publish("construction", {"version": version}),
+            on_question=lambda question: self.events.publish("construction-question", question),
+            planned_regions=self.downloader.planned_regions,
+            view_center=lambda: self.settings.initial_view()[:2],
         )
         self.downloader.on_install(lambda cid, cell_dir: install_ancestors(cell_dir, cid, self.lowzoom))
         self.cells.on_queue(self.downloader.queue_changed)
@@ -138,6 +143,7 @@ class AppCore:
         self.online_server.cors_origin = self.server.origin
         if self._downloads:
             self.downloader.start()
+            self.construction.start()
         return f"{self.server.base_url}/app/index.html"
 
     def clear_cache(self) -> list[str]:
@@ -151,7 +157,7 @@ class AppCore:
                 # While the gate is closed nothing opens or creates a file in
                 # data\, so no file is locked or recreated during the deletion.
                 self.extracts.stop()  # downloads and filtering of regional extracts
-                self.construction.stop(timeout=1.0)  # a query still running is never saved
+                self.construction.stop(timeout=1.0)
                 with self.home.blocked_while_clearing():
                     # Online tiles go to memory from now on, so reloading the map
                     # after clearing does not recreate data\ (SPEC §6.6).
@@ -249,6 +255,8 @@ class AppCore:
         add("GET", "/api/details", self._api_details)
         add("GET", "/api/details/online", self._api_details_online)
         add("GET", "/api/settings", self._api_settings)
+        add("GET", "/api/construction", lambda _req: json_response({"question": self.construction.question()}))
+        add("POST", "/api/construction/decide", self._api_construction_decide)
         add("POST", "/api/settings", self._api_settings_save)
         add("GET", r"/tiles/rail/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_rail)
         add("GET", r"/tiles/basemap/(?P<z>\d{1,2})/(?P<x>\d{1,7})/(?P<y>\d{1,7})\.mvt", self._tile_basemap)
@@ -432,6 +440,13 @@ class AppCore:
         p = req.params
         data = self.rail.tile(int(p["z"]), int(p["x"]), int(p["y"]))
         return Response(200 if data else 204, data, "application/x-protobuf", PNG_HEADERS)
+
+    def _api_construction_decide(self, req: Request) -> Response:
+        """Answer to the question after the overlay's download (SPEC §7.9)."""
+        data = req.json() or {}
+        if not isinstance(data.get("delete"), bool):
+            return error_response(400, "delete must be true or false")
+        return json_response(self.construction.decide(data["delete"]))
 
     def _tile_construction(self, req: Request) -> Response:
         p = req.params

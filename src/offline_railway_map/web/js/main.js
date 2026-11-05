@@ -6,6 +6,7 @@ import {
 } from './basemap.js';
 import { Cells, renderDownloadPanel } from './grid.js';
 import { setupClearButton } from './clear.js';
+import { askAboutExtracts } from './construction.js';
 import { setupDetails } from './details.js';
 import { addGroupMarkers, addOnlineLayers, refreshOnlineLayers } from './layers.js';
 import { setupLegend } from './legend.js';
@@ -121,6 +122,7 @@ async function boot() {
     cell: (row) => { cells.updateCell(row); renderDownloadPanel(cells); },
     settings: applySettings,
     construction: ({ version }) => refreshConstruction(map, version),
+    'construction-question': askAboutExtracts,
     tiles: ({ version }) => {
       refreshOnlineLayers(map, version);
       refreshRailLayers(map, version);
@@ -128,6 +130,8 @@ async function boot() {
     },
   });
   document.body.dataset.mapReady = 'true';
+  // A question about the overlay's extracts left unanswered last time (SPEC §7.9).
+  api.get('/api/construction').then(({ question }) => askAboutExtracts(question)).catch(() => {});
 }
 
 boot().catch((err) => {

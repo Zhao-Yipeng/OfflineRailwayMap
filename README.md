@@ -13,7 +13,7 @@
 - **开始浏览**：选中的方格在后台下载（离线底图来自 Protomaps），下完一格就立即改用本地数据显示。铁路数据的来源自动选择：一次下载 6 格及以上时用 Geofabrik 的地区数据包（例如整个省一次下载，在本地筛出铁路），少于 6 格时用 Overpass API；数据包用不了时自动改用 Overpass。两者是同一份 OpenStreetMap 数据，显示效果相同，数据包每天更新一次。
 - **缓存区域**：任何缩放级别都显示干线、支线、在建和规划线路，并按速度着色（与网页版相同的颜色）；z9 起标速度数字；站线、渡线等配线放大后才显示；离线底图和车站名断网也能用。
 - **未缓存区域**：铁路与 OpenRailwayMap 网页版的「最高速度」图层一致，联网边看边加载；底图来自 OpenFreeMap，配色与离线底图相同。
-- **永远显示在建线路**（设置中的开关，默认关）：网页版从 z9 起才显示在建线路，而且只显示干线和支线。打开后，未缓存区域也在所有缩放级别显示在建线路，样式与已建成线路相同（按速度着色）。数据按视野从 Overpass 查询，在 `data\cache\` 中保存 7 天。
+- **永远显示在建线路**（设置中的开关，默认关，只对中国有效）：网页版从 z9 起才显示在建线路，而且只显示干线和支线。打开后，中国未缓存的区域也在所有缩放级别显示在建铁路，样式与已建成线路相同（按速度着色）。打开时程序下载中国各省的地区数据包（已有的直接用，和下载方格共用），提取出在建线路后询问是否立即删除专门为此下载的数据包。
 - 搜索车站和地名、点击线路看详情、速度图例、设置。
 - **清空缓存**：左下角按钮一键删除程序产生的全部数据，程序文件夹恢复到刚解压时的样子。
 
@@ -41,8 +41,8 @@
 |-------------|------|------|
 | OpenRailwayMap 瓦片与搜索 API | 未缓存区域的速度图层、车站搜索 | 只限免费、公开的非商业程序使用；必须带本程序的 User-Agent；只按需请求；收到 429 停止访问。<https://wiki.openstreetmap.org/wiki/OpenRailwayMap/API> |
 | OpenFreeMap 矢量瓦片 | 未缓存区域的灰色底图（按离线底图的配色显示） | 免费、不限访问量、不需要注册；必须署名。只按视野请求，按 HTTP 缓存头缓存（最多 7 天）。<https://openfreemap.org/tos/> |
-| Overpass API | 下载方格的铁路数据（少于 6 格时）；打开「永远显示在建线路」时，未缓存区域的在建线路 | 按每台服务器允许的名额并发，记录每天的用量；在建线路每个区域 7 天内只查询一次。 |
-| Geofabrik 地区数据包 | 下载方格的铁路数据（6 格及以上时） | 免费下载，不要短时间内反复下载同一文件。同一地区只下载一次，筛出的铁路保留 7 天。<https://download.geofabrik.de/technical.html> |
+| Overpass API | 下载方格的铁路数据（少于 6 格时） | 按每台服务器允许的名额并发，记录每天的用量。 |
+| Geofabrik 地区数据包 | 下载方格的铁路数据（6 格及以上时）；「永远显示在建线路」的中国各省数据 | 免费下载，不要短时间内反复下载同一文件。同一地区只下载一次，同时最多下载 2 个，筛出的铁路保留 7 天。<https://download.geofabrik.de/technical.html> |
 | Protomaps 每日构建 | 离线底图 | 按方格一次性读取需要的部分。<https://docs.protomaps.com/basemaps/downloads> |
 | Nominatim | 地名搜索 | 每秒最多一次，只在按回车时搜索。<https://operations.osmfoundation.org/policies/nominatim/> |
 
@@ -74,7 +74,7 @@ python -m offline_railway_map --serve   # 只启动本地服务，在浏览器�
 python -m pytest                        # 单元测试和集成测试
 ```
 
-- 端到端测试（需要 Node.js 和 Playwright）：`PYTHON=<python 路径> node tests/e2e/smoke.cjs`，以及同目录下的 `cells.cjs`、`features.cjs`、`details.cjs`、`online.cjs`、`download.cjs`（后两个会访问真实服务器；`download.cjs` 可以用环境变量 `E2E_SETTINGS` 传入 settings.ini 内容，例如把 Overpass 指向本地替身服务器）。
+- 端到端测试（需要 Node.js 和 Playwright）：`PYTHON=<python 路径> node tests/e2e/smoke.cjs`，以及同目录下的 `cells.cjs`、`features.cjs`、`details.cjs`、`construction.cjs`、`online.cjs`、`download.cjs`（后两个会访问真实服务器；`download.cjs` 可以用环境变量 `E2E_SETTINGS` 传入 settings.ini 内容，例如把 Overpass 指向本地替身服务器）。
 - Qt 窗口冒烟测试：`QT_QPA_PLATFORM=offscreen python tests/qt_smoke.py`。
 - 第三方前端资源：`python tools/vendor_assets.py`（固定版本并校验哈希）；离线底图样式由 `tools/build_basemap_style.mjs` 生成。
 - 打包（Windows）：`pyinstaller packaging/OfflineRailwayMap.spec --noconfirm`，输出在 `dist\OfflineRailwayMap\`。必须使用单文件夹模式。

@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -49,6 +50,7 @@ from .paths import Home
 log = logging.getLogger(__name__)
 
 INDEX_URL = "https://download.geofabrik.de/index-v1.json"
+ENV_INDEX = "OFFLINE_RAILWAY_MAP_EXTRACT_INDEX"  # another index (end-to-end tests: a local stand-in)
 EXTRACT_MIN_CELLS = 6  # from this many cells waiting, extracts are preferred (user's choice)
 REUSE_FOR = 7 * 24 * 3600.0
 PARTIAL_KEPT_FOR = 24 * 3600.0  # an interrupted download is continued within this time
@@ -59,6 +61,7 @@ PARTIAL_KEPT_FOR = 24 * 3600.0  # an interrupted download is continued within th
 MAX_MB_PER_CELL = 250
 FAILED_PAUSE = 30 * 60.0  # after a failed download, cells use Overpass for this long
 RETRY_DELAYS = (5, 15, 45, 120)  # seconds before continuing a broken download
+DOWNLOADS_AT_ONCE = 2  # extracts downloaded at the same time (cells and the construction overlay together)
 MIN_SHARE = 0.005  # share of a cell a region must cover to be used for it
 SLIVER = 0.03  # degrees: leftovers narrower than about twice this are border slivers
 LINE_TYPES = frozenset({"rail", "narrow_gauge", "subway", "light_rail", "tram", "construction", "proposed", "disused"})
@@ -430,10 +433,10 @@ class _RegionJob:
 class ExtractStore:
     """Downloads, filters and serves regional extracts (thread-safe)."""
 
-    def __init__(self, home: Home, session: requests.Session, index_url: str = INDEX_URL) -> None:
+    def __init__(self, home: Home, session: requests.Session, index_url: str | None = None) -> None:
         self.home = home
         self.session = session
-        self.index_url = index_url
+        self.index_url = index_url or os.environ.get(ENV_INDEX) or INDEX_URL
         self._index: RegionIndex | None = None
         self._index_lock = threading.Lock()
         self._sizes: dict[str, int | None] = {}
@@ -441,6 +444,12 @@ class ExtractStore:
         self._lock = threading.Lock()
         self._failed_until: dict[str, float] = {}
         self._stop = threading.Event()
+        self._download_slots = threading.BoundedSemaphore(DOWNLOADS_AT_ONCE)
+        self._cell_used: set[str] = set()  # regions cell downloads used while the program runs
+        # Hooks for the construction overlay (construction.py): a region was
+        # filtered (by anyone), or cells are about to use a region.
+        self.on_filtered: Callable[[str], None] = lambda rid: None
+        self.on_cell_use: Callable[[str], None] = lambda rid: None
 
     @property
     def folder(self) -> Path:
@@ -511,6 +520,9 @@ class ExtractStore:
         for rid in regions:
             if not self.usable(rid):
                 raise ExtractUnavailable(f"地区数据包 {rid} 暂时不可用")
+        for rid in regions:
+            self._cell_used.add(rid)  # before the hook: the overlay checks this set (see construction.py)
+            self.on_cell_use(rid)
         for n, rid in enumerate(regions):
             share = 1 / len(regions)
             self._ensure(rid, cancel, activity, received, lambda f, n=n: progress((n + f) * share))
@@ -524,6 +536,17 @@ class ExtractStore:
                     found[key] = element
         return list(found.values())
 
+    def ensure(self, rid: str, cancel: threading.Event, activity: Activity) -> bool:
+        """Make sure the region's railways are on disk (for the construction overlay).
+
+        Returns True if this call downloaded them, False if they were there
+        already or another download (of cells) brought them.
+        """
+        return self._ensure(rid, cancel, activity, lambda n: None, lambda f: None)
+
+    def used_by_cells(self, rid: str) -> bool:
+        return rid in self._cell_used
+
     def _ensure(
         self,
         rid: str,
@@ -531,12 +554,16 @@ class ExtractStore:
         activity: Activity,
         received: Callable[[int], None],
         progress: Callable[[float], None],
-    ) -> None:
+    ) -> bool:
         if self.fresh(rid):
-            return
+            return False
         name = self.index().regions[rid].name if rid in self.index().regions else rid
         with self._lock:
             job = self._jobs.get(rid)
+            # Checked again under the lock: a job that just finished has written
+            # the region and left _jobs, and must not be started a second time.
+            if job is None and self.fresh(rid):
+                return False
             starter = job is None
             if starter:
                 job = self._jobs[rid] = _RegionJob()
@@ -562,6 +589,7 @@ class ExtractStore:
                 job.listeners.remove(tell)
         if job.error is not None:
             raise ExtractUnavailable(str(job.error))
+        return starter
 
     def _run_job(self, rid: str, name: str, job: _RegionJob, received: Callable[[int], None]) -> None:
         def report(text: str, fraction: float) -> None:
@@ -570,18 +598,28 @@ class ExtractStore:
                 listener(text, fraction)
 
         stop = self._stop  # this job's stop signal, even if a later stop() makes a new one
+        filtered = False
         try:
             region = self.index().regions[rid]
             self.home.ensure_dir(self.folder)
             pbf = self.folder / f"{_safe(rid)}.osm.pbf"
             if not pbf.exists():
-                self._download(region, pbf, name, report, received, stop)
+                if not self._download_slots.acquire(blocking=False):
+                    report(f"等待下载地区数据包「{name}」（同时最多下载 {DOWNLOADS_AT_ONCE} 个）", 0.0)
+                    while not self._download_slots.acquire(timeout=0.5):
+                        if stop.is_set():
+                            raise Cancelled()
+                try:
+                    self._download(region, pbf, name, report, received, stop)
+                finally:
+                    self._download_slots.release()
             report(f"筛选地区数据包「{name}」中的铁路", 0.0)
             filter_railways(
                 pbf, self.db_path(rid), stop,
                 lambda p: report(f"筛选地区数据包「{name}」中的铁路 {round(p * 100)}%", p),
             )
             pbf.unlink(missing_ok=True)
+            filtered = True
         except Cancelled:  # closing or clearing: not a failure of the region
             job.error = ExtractUnavailable(f"地区数据包「{name}」已停止")
         except Exception as exc:  # noqa: BLE001 - every cell waiting falls back to Overpass
@@ -592,6 +630,11 @@ class ExtractStore:
             job.done.set()
             with self._lock:
                 self._jobs.pop(rid, None)
+        if filtered and not stop.is_set():
+            try:
+                self.on_filtered(rid)
+            except Exception:  # noqa: BLE001 - a listener must not break downloads
+                log.exception("after filtering %s", rid)
 
     def _download(self, region: Region, path: Path, name: str, report, received, stop: threading.Event) -> None:
         """Download (continuing a partial file) and check the MD5 sum."""
@@ -711,6 +754,28 @@ class ExtractStore:
     def forget(self) -> None:
         """After 「清空缓存」: nothing is known about local files any more."""
         self._failed_until.clear()
+        self._cell_used.clear()
+
+    def busy(self, rid: str) -> bool:
+        """True while the region is being downloaded or filtered."""
+        with self._lock:
+            return rid in self._jobs
+
+    def delete_regions(self, rids: set[str]) -> int:
+        """Delete these regions' files (not those being downloaded); returns the bytes freed."""
+        freed = 0
+        if self.home.blocked or not self.folder.is_dir():
+            return 0
+        with self._lock:
+            for rid in rids:
+                if rid in self._jobs:
+                    continue
+                for path in (self.db_path(rid), self.folder / f"{_safe(rid)}.osm.pbf",
+                             self.folder / f"{_safe(rid)}.osm.pbf.part"):
+                    if path.exists():
+                        freed += path.stat().st_size
+                        path.unlink(missing_ok=True)
+        return freed
 
 
 def _shared_area(a, b) -> float:

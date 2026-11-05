@@ -1,101 +1,92 @@
-"""Lines under construction in uncached areas (setting 「永远显示在建线路」, SPEC §7.9)."""
+"""Lines under construction across China (setting 「永远显示在建线路」, SPEC §7.9).
+
+A stand-in Geofabrik serves the same small extract for each of the six
+"provinces" of test_extracts.index_json ("china" > west1, west2, beijing,
+tianjin, east1, east2; "mongolia" is outside China).
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
-import re
 import threading
 import time
-from urllib.parse import parse_qs
+from pathlib import Path
 
 import mapbox_vector_tile
+import osmium
 import pytest
 import requests
+from osmium.osm.mutable import Node, Way
 
 from fakeserver import FakeServer
 from offline_railway_map import construction
-from offline_railway_map.construction import ConstructionLines, data_zoom
+from offline_railway_map.construction import ConstructionLines
 from offline_railway_map.coverage import CellCoverage
+from offline_railway_map.extracts import ExtractStore
 from offline_railway_map.grid import lonlat_to_tile
-from offline_railway_map.overpass import OverpassClient
-from offline_railway_map.store import StateStore
-from railfixtures import way
+from test_extracts import index_json
 
-BEIJING = (116.4, 39.9)
-
-
-def ways() -> list[dict]:
-    return [
-        # a high-speed line under construction near Beijing: drawn at every zoom
-        way(1, [(116.1, 39.6), (116.7, 40.2)], railway="construction", construction="rail", usage="main",
-            maxspeed="350", name="在建高铁"),
-        # a subway under construction: from z10, where the ORM tiles draw it
-        way(2, [(116.38, 39.89), (116.42, 39.91)], railway="construction", construction="subway"),
-        # built lines are not part of the overlay (ORM's tiles draw them)
-        way(3, [(116.1, 39.7), (116.5, 40.0)], railway="rail", usage="main", maxspeed="200"),
-        # a siding under construction: from z13, where the ORM tiles draw it
-        way(4, [(116.40, 39.90), (116.41, 39.905)], railway="construction", **{"construction:railway": "rail"},
-            service="siding"),
-    ]
+PROVINCES = ("west1", "west2", "beijing", "tianjin", "east1", "east2")
+ON_LINE = (116.4, 39.9)  # a point on the high-speed line under construction
 
 
-def asked_for(query: str, element: dict) -> bool:
-    """What our query selects: railway lines under construction without service."""
-    tags = element["tags"]
-    rail = tags.get("construction") == "rail" or tags.get("construction:railway") == "rail"
-    return tags.get("railway") == "construction" and rail and "service" not in tags
+def write_pbf(path: Path) -> None:
+    with osmium.SimpleWriter(str(path)) as w:
+        for i, (lon, lat) in enumerate([(116.1, 39.6), (116.4, 39.9), (116.7, 40.2)], 1):
+            w.add_node(Node(id=i, location=(lon, lat)))
+        w.add_node(Node(id=11, location=(116.38, 39.89)))
+        w.add_node(Node(id=12, location=(116.42, 39.91)))
+        w.add_node(Node(id=21, location=(116.1, 39.7)))
+        w.add_node(Node(id=22, location=(116.5, 40.0)))
+        w.add_node(Node(id=31, location=(116.40, 39.90)))
+        w.add_node(Node(id=32, location=(116.41, 39.905)))
+        # a high-speed line under construction: drawn at every zoom
+        w.add_way(Way(id=100, nodes=[1, 2, 3], tags={"railway": "construction", "construction": "rail",
+                                                     "usage": "main", "maxspeed": "350", "name": "在建高铁"}))
+        # from z10 / z13 the ORM tiles draw these: not part of the overlay
+        w.add_way(Way(id=101, nodes=[11, 12], tags={"railway": "construction", "construction": "subway"}))
+        w.add_way(Way(id=103, nodes=[31, 32], tags={"railway": "construction", "construction:railway": "rail",
+                                                    "service": "siding"}))
+        # built lines come from the ORM tiles
+        w.add_way(Way(id=102, nodes=[21, 22], tags={"railway": "rail", "usage": "main", "maxspeed": "200"}))
 
 
-def bbox_of(query: str) -> tuple[float, float, float, float]:
-    s, w, n, e = (float(v) for v in re.search(r"\]\(([^)]*)\);", query).group(1).split(","))
-    return s, w, n, e
+class Geofabrik:
+    """Index, extracts and checksums; ``slow`` regions take ``delay`` seconds to answer."""
 
+    def __init__(self, tmp_path: Path) -> None:
+        pbf = tmp_path / "served.osm.pbf"
+        write_pbf(pbf)
+        self.data = pbf.read_bytes()
+        self.slow: dict[str, float] = {}
+        self.server = FakeServer().start()
+        self.server.routes["/index-v1.json"] = lambda r: (
+            200, {"Content-Type": "application/json"}, json.dumps(index_json(self.server.url)).encode())
+        md5 = hashlib.md5(self.data).hexdigest()
+        for name in (*PROVINCES, "china", "mongolia", "asia"):
+            self.server.routes[f"/{name}.osm.pbf"] = self._route(name)
+            self.server.routes[f"/{name}.osm.pbf.md5"] = lambda r: (200, {}, f"{md5}  x.osm.pbf\n".encode())
 
-class Overpass:
-    """Answers our construction query from ``ways()``; refuses areas wider than ``max_width``."""
+    def _route(self, name: str):
+        def route(rec):
+            if rec.method == "GET":
+                time.sleep(self.slow.get(name, 0.0))
+            return 200, {}, self.data
+        return route
 
-    def __init__(self, max_width: float = 360.0, delay: float = 0.0) -> None:
-        self.max_width = max_width
-        self.delay = delay
-        self.server = FakeServer()
-        self.server.routes["/api/interpreter"] = self.answer
-        self.server.default = lambda rec: (200, {"Content-Type": "text/plain"}, b"Rate limit: 2\n")
-        self.server.start()
-        self.queries: list[tuple[float, float, float, float]] = []
+    def downloads(self, name: str) -> int:
+        return sum(1 for r in self.server.requests if r.method == "GET" and r.path == f"/{name}.osm.pbf")
 
-    def answer(self, rec):
-        query = parse_qs(rec.body.decode())["data"][0]
-        assert 'way["railway"="construction"]' in query
-        s, w, n, e = bbox_of(query)
-        self.queries.append((s, w, n, e))
-        time.sleep(self.delay)
-        if e - w > self.max_width:
-            body = {"elements": [], "remark": "runtime error: Query run out of memory using about 2048 MB of RAM."}
-        else:
-            found = [x for x in ways() if any(w <= p["lon"] <= e and s <= p["lat"] <= n for p in x["geometry"])]
-            body = {"elements": [x for x in found if asked_for(query, x)]}
-        return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
-
-    @property
-    def url(self) -> str:
-        return self.server.url + "/api/interpreter"
+    def downloaded(self) -> set[str]:
+        return {r.path[1:].split(".")[0] for r in self.server.requests if r.method == "GET" and r.path.endswith(".osm.pbf")}
 
 
 @pytest.fixture
-def overpass():
-    fake = Overpass()
+def geofabrik(tmp_path):
+    fake = Geofabrik(tmp_path)
     yield fake
     fake.server.stop()
-
-
-CREATED: list[ConstructionLines] = []
-
-
-@pytest.fixture(autouse=True)
-def stop_fetching():
-    yield
-    while CREATED:
-        CREATED.pop().stop(timeout=2.0)
 
 
 class Switch:
@@ -106,157 +97,203 @@ class Switch:
         return self.on
 
 
-def make(home, fake: Overpass, switch: Switch | None = None, coverage: CellCoverage | None = None):
-    client = OverpassClient(
-        requests.Session(), lambda: [fake.url], StateStore(home), min_interval=0,
-        server_slots=lambda endpoint: 2, busy_backoff=(0.05,), busy_response_seconds=0.0,
+CREATED: list[ConstructionLines] = []
+
+
+@pytest.fixture(autouse=True)
+def stop_everything():
+    yield
+    while CREATED:
+        lines = CREATED.pop()
+        lines.stop(timeout=5.0)
+        lines.extracts.stop(timeout=5.0)
+        lines.close()
+
+
+def make(home, geofabrik, switch=None, coverage=None, planned=frozenset(), center=(116.4, 39.9)) -> ConstructionLines:
+    store = ExtractStore(home, requests.Session(), index_url=geofabrik.server.url + "/index-v1.json")
+    lines = ConstructionLines(
+        home, store, coverage or CellCoverage(), switch or Switch(),
+        on_change=lambda version: None, planned_regions=lambda: set(planned), view_center=lambda: center,
     )
-    changes: list[int] = []
-    lines = ConstructionLines(home, client, coverage or CellCoverage(), switch or Switch(), on_change=changes.append)
-    lines.changes = changes
+    lines.questions = []
+    lines.on_question = lines.questions.append
     CREATED.append(lines)
     return lines
 
 
-def tile_at(z: int, lon: float = BEIJING[0], lat: float = BEIJING[1]) -> tuple[int, int, int]:
+def wait_for_question(lines: ConstructionLines, timeout: float = 30.0) -> dict | None:
+    """Wait for the pass started last to finish; the question it asked, if any."""
+    asked = len(lines.questions)
+    thread = lines._thread
+    if thread is not None:
+        thread.join(timeout)
+        assert not thread.is_alive(), "the pass did not finish"
+    return lines.questions[-1] if len(lines.questions) > asked or (asked and thread is None) else None
+
+
+def tile_at(z: int, lon: float = ON_LINE[0], lat: float = ON_LINE[1]) -> tuple[int, int, int]:
     x, y = lonlat_to_tile(lon, lat, z)
     return z, int(x), int(y)
 
 
-def features(data: bytes) -> list[dict]:
+def ids(data: bytes) -> set[int]:
     if not data:
-        return []
-    return mapbox_vector_tile.decode(data).get("rail", {}).get("features", [])
+        return set()
+    return {f["id"] for f in mapbox_vector_tile.decode(data).get("rail", {}).get("features", [])}
 
 
-def wait_for(lines: ConstructionLines, z: int, timeout: float = 20.0, **where) -> bytes:
-    """Ask for a tile until it has data (the area is fetched in the background)."""
-    end = time.time() + timeout
-    while time.time() < end:
-        data = lines.tile(*tile_at(z, **where))
-        if data:
-            return data
-        time.sleep(0.05)
-    raise AssertionError("no construction lines arrived")
-
-
-def test_switched_off_nothing_is_asked_for(home, overpass):
-    lines = make(home, overpass, Switch(False))
+def test_switched_off_nothing_is_downloaded(home, geofabrik):
+    lines = make(home, geofabrik, Switch(False))
+    lines.start()
     assert lines.tile(*tile_at(6)) == b""
-    time.sleep(0.2)
-    assert overpass.queries == [] and not home.data_exists()
+    time.sleep(0.3)
+    assert geofabrik.server.requests == [] and not home.data_exists()
 
 
-def test_lines_under_construction_at_every_zoom_drawn_like_built_lines(home, overpass):
-    lines = make(home, overpass)
-    assert lines.tile(*tile_at(5)) == b"", "nothing yet: the area is fetched in the background"
-    wait_for(lines, 5)
+def test_switching_on_downloads_china_once_and_draws_its_lines_at_every_zoom(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    assert geofabrik.downloaded() == set(PROVINCES), "every province once; nothing outside China"
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES)
+    assert sorted(question["regions"]) == sorted(PROVINCES) and question["bytes"] > 0
     for z in range(2, 15):
-        found = features(wait_for(lines, z))
-        ids = {f["id"] for f in found}
-        assert 1 in ids, f"the high-speed line is shown at z{z}"
-        line = next(f for f in found if f["id"] == 1)
-        assert line["properties"]["st"] == "c" and line["properties"]["sp"] == 350, "coloured by its speed"
-        assert ids == {1}, "built lines, subways and sidings: the ORM tiles draw them where they appear"
-    assert lines.changes, "the page is told to reload the overlay"
-    assert (home.cache_dir / "construction.sqlite").exists()
+        data = lines.tile(*tile_at(z))
+        assert ids(data) == {100}, f"z{z}: the line under construction, nothing else"
+        feature = mapbox_vector_tile.decode(data)["rail"]["features"][0]
+        assert feature["properties"]["st"] == "c" and feature["properties"]["sp"] == 350, "coloured by its speed"
+    assert lines.tile(*tile_at(6, lon=10.0, lat=50.0)) == b"", "outside China: nothing"
 
 
-def test_zooming_in_asks_for_nothing(home, overpass):
-    """From z9 the ORM tiles draw lines under construction: nothing to wait for."""
-    lines = make(home, overpass)
-    assert lines.tile(*tile_at(12)) == b""
+def test_extracts_already_on_disk_are_shared_and_not_asked_about(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.extracts.cell_elements(210, 96, ["beijing"], threading.Event(), lambda *a: None, lambda n: None)
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    assert geofabrik.downloads("beijing") == 1, "downloaded for cells, used by the overlay too"
+    assert "beijing" not in question["regions"] and len(question["regions"]) == len(PROVINCES) - 1
+
+
+def test_deleting_removes_only_what_was_downloaded_for_this(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.extracts.cell_elements(210, 96, ["beijing"], threading.Event(), lambda *a: None, lambda n: None)
+    lines.settings_changed()
+    wait_for_question(lines)
+    result = lines.decide(delete=True)
+    assert result["deleted"] == len(PROVINCES) - 1 and result["bytes"] > 0
+    assert lines.extracts.db_path("beijing").exists(), "the cells' extract stays"
+    assert not any(lines.extracts.db_path(p).exists() for p in PROVINCES if p != "beijing")
+    assert ids(lines.tile(*tile_at(9))) == {100}, "the lines are kept"
+    assert lines.question() is None
+
+
+def test_keeping_leaves_them_like_other_extracts(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    wait_for_question(lines)
+    assert lines.decide(delete=False)["deleted"] == 0
+    assert all(lines.extracts.db_path(p).exists() and lines.extracts.fresh(p) for p in PROVINCES)
+    assert lines.question() is None
+
+
+def test_a_region_cells_need_while_it_downloads_is_shared_and_kept(home, geofabrik):
+    geofabrik.slow["tianjin"] = 1.5
+    lines = make(home, geofabrik, center=(116.0, 39.0))  # tianjin first
+    lines.settings_changed()
+    end = time.time() + 10
+    while geofabrik.downloads("tianjin") == 0 and time.time() < end:
+        time.sleep(0.02)
+    elements = lines.extracts.cell_elements(210, 97, ["tianjin"], threading.Event(), lambda *a: None, lambda n: None)
+    assert {e["id"] for e in elements} >= {100}
+    question = wait_for_question(lines)
+    assert geofabrik.downloads("tianjin") == 1, "one download for both"
+    assert "tianjin" not in question["regions"], "cells use it: not only for the overlay"
+    lines.decide(delete=True)
+    assert lines.extracts.db_path("tianjin").exists()
+
+
+def test_regions_waiting_cells_may_read_are_kept(home, geofabrik):
+    lines = make(home, geofabrik, planned={"east1"})
+    lines.settings_changed()
+    wait_for_question(lines)
+    result = lines.decide(delete=True)
+    assert result["kept"] == 1 and lines.extracts.db_path("east1").exists()
+    assert not lines.extracts.db_path("west1").exists()
+
+
+def test_cells_using_an_extract_kept_for_the_overlay_take_it_over(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    assert "beijing" in question["regions"]
+    lines.extracts.cell_elements(210, 96, ["beijing"], threading.Event(), lambda *a: None, lambda n: None)
+    assert geofabrik.downloads("beijing") == 1, "already there: no second download"
+    assert "beijing" not in lines.question()["regions"]
+    lines.decide(delete=True)
+    assert lines.extracts.db_path("beijing").exists()
+
+
+def test_an_unanswered_question_comes_back_after_a_restart(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    first = wait_for_question(lines)
+    lines.stop()
+    lines.close()
+    again = make(home, geofabrik)
+    assert again.question()["regions"] == first["regions"]
+    again.start()  # nothing missing: no new pass, no new downloads
     time.sleep(0.3)
-    assert overpass.queries == []
-    wait_for(lines, 8)
-    s, w, n, e = overpass.queries[0]
-    assert data_zoom(8) == 5 and e - w == pytest.approx(360 / 2**5), "a z8 view asks for its z5 area"
-    asked = len(overpass.queries)
-    assert {f["id"] for f in features(lines.tile(*tile_at(12)))} == {1}, "drawn from what the overview fetched"
-    time.sleep(0.3)
-    assert len(overpass.queries) == asked
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES)
 
 
-def test_inside_cached_cells_the_cell_draws_its_own_lines(home, overpass):
+def test_switching_off_stops_and_asks_about_what_was_downloaded(home, geofabrik):
+    for name in PROVINCES:
+        geofabrik.slow[name] = 0.4
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch)
+    lines.settings_changed()
+    end = time.time() + 10
+    while len(geofabrik.downloaded()) < 2 and time.time() < end:
+        time.sleep(0.02)
+    switch.on = False
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    assert question is not None and 1 <= len(question["regions"]) <= 2
+    time.sleep(1.0)
+    assert len(geofabrik.downloaded()) <= 2, "no further provinces after switching off"
+
+
+def test_inside_cached_cells_the_cell_draws_its_own_lines(home, geofabrik):
     coverage = CellCoverage()
-    lines = make(home, overpass, coverage=coverage)
-    wait_for(lines, 8)
-    assert features(lines.tile(*tile_at(10)))
+    lines = make(home, geofabrik, coverage=coverage)
+    lines.settings_changed()
+    wait_for_question(lines)
     z, x, y = tile_at(10)
     coverage.replace({(x >> 2, y >> 2)})
     assert lines.tile(z, x, y) == b""
-    assert lines.tile(*tile_at(6)), "lower zooms keep the overlay (drawn below the cached lines)"
+    assert ids(lines.tile(*tile_at(6))) == {100}, "lower zooms keep the overlay (drawn below the cached lines)"
 
 
-def test_fetched_areas_are_kept_and_used_after_a_restart(home, overpass):
-    wait_for(make(home, overpass), 7)
-    asked = len(overpass.queries)
-    again = make(home, overpass)
-    assert features(again.tile(*tile_at(7))), "shown straight from disk"
-    time.sleep(0.3)
-    assert len(overpass.queries) == asked, "nothing fetched again within 7 days"
-
-
-def test_old_areas_are_fetched_again(home, overpass, monkeypatch):
-    wait_for(make(home, overpass), 7)
-    asked = len(overpass.queries)
+def test_switching_on_again_refreshes_old_lines_from_extracts_on_disk(home, geofabrik, monkeypatch):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    wait_for_question(lines)
+    lines.decide(delete=False)
+    before = lines._built_at("beijing")
     monkeypatch.setattr(construction, "FRESH_FOR", 0.0)
-    again = make(home, overpass)
-    assert features(again.tile(*tile_at(7))), "the old data is shown meanwhile"
-    end = time.time() + 10
-    while len(overpass.queries) == asked and time.time() < end:
-        time.sleep(0.05)
-    assert len(overpass.queries) > asked
+    lines.settings_changed()
+    wait_for_question(lines)
+    assert lines._built_at("beijing") > before
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES), "the extracts on disk were used"
+    assert len(lines.questions) == 1, "nothing new to ask about"
 
 
-def test_an_area_too_big_for_the_servers_is_asked_for_in_quarters(home):
-    fake = Overpass(max_width=30.0)  # z3 areas (45°) are refused, z4 areas (22.5°) answered
-    try:
-        lines = make(home, fake)
-        found = features(wait_for(lines, 4))
-        assert 1 in {f["id"] for f in found}
-        widths = [round(e - w, 3) for s, w, n, e in fake.queries]
-        assert 45.0 in widths and 22.5 in widths
-        refused = widths.count(45.0)
-        lines.tile(*tile_at(4))
-        lines.tile(*tile_at(3))
-        time.sleep(0.3)
-        assert [round(e - w, 3) for s, w, n, e in fake.queries].count(45.0) == refused, "not asked again"
-    finally:
-        fake.server.stop()
-
-
-def test_switching_off_while_fetching_saves_nothing(home):
-    fake = Overpass(delay=0.5)
-    switch = Switch(True)
-    try:
-        lines = make(home, fake, switch)
-        lines.tile(*tile_at(6))
-        end = time.time() + 5
-        while not fake.queries and time.time() < end:
-            time.sleep(0.01)
-        switch.on = False
-        lines.settings_changed()
-        time.sleep(1.0)  # the answer arrives after switching off
-        assert not (home.cache_dir / "construction.sqlite").exists()
-        switch.on = True
-        assert lines.tile(*tile_at(6)) == b"", "not drawn from an abandoned answer"
-    finally:
-        fake.server.stop()
-
-
-def test_stop_abandons_a_running_query(home):
-    fake = Overpass(delay=0.5)
-    try:
-        lines = make(home, fake)
-        lines.tile(*tile_at(6))
-        end = time.time() + 5
-        while not fake.queries and time.time() < end:
-            time.sleep(0.01)
-        lines.stop(timeout=0)
-        lines.close()
-        time.sleep(1.0)
-        assert not (home.cache_dir / "construction.sqlite").exists(), "nothing saved after stop()"
-        assert not any(t.name == "construction" and t.is_alive() for t in threading.enumerate())
-    finally:
-        fake.server.stop()
+def test_a_province_filtered_for_cells_updates_its_lines(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    wait_for_question(lines)
+    lines.decide(delete=True)
+    before = lines._built_at("tianjin")
+    lines.extracts.cell_elements(210, 97, ["tianjin"], threading.Event(), lambda *a: None, lambda n: None)
+    assert lines._built_at("tianjin") > before

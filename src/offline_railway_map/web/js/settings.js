@@ -36,7 +36,8 @@ export function setupSettings(onSaved) {
       el('label', { class: 'inline' }, outline, '浏览模式下显示已缓存方格的边框'),
       el('div', { class: 'option' },
         el('label', { class: 'inline' }, construction, '永远显示在建线路'),
-        el('small', {}, '未缓存的区域也在所有缩放级别显示在建线路，样式与已建成线路相同（数据按需从 Overpass 获取）')),
+        el('small', {}, '只对中国有效。未缓存的区域也在所有缩放级别显示在建铁路，样式与已建成线路相同。'
+          + '打开时下载中国各省的地区数据包（已有的直接用），提取出在建线路后询问是否删除专门为此下载的数据包。')),
       el('details', { class: 'about' }, el('summary', {}, `关于 ${about.app} ${about.version}`),
         el('p', {}, `许可证：${about.license}`),
         el('p', {}, about.disclaimer),
