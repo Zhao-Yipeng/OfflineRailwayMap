@@ -354,6 +354,10 @@ class ConstructionLines:
                 region.id, run.cancel, lambda text, *a, **k: self._note(f"{label}：{text}")
             )
         except extracts_module.Cancelled:
+            if not run.quiet:
+                # Switched off: the province's download stops too, unless cells wait for it
+                # (closing or clearing stops every download anyway).
+                self.extracts.abandon(region.id)
             return None
         except ExtractUnavailable as exc:
             log.warning("construction lines: %s", exc)

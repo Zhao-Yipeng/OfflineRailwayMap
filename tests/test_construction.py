@@ -500,3 +500,45 @@ def test_the_extract_read_last_decides_about_its_lines(home, geofabrik):
     lines.close()
     again = make(home, geofabrik)
     assert 100 not in ids(again.tile(*tile_at(6))) and 104 in ids(again.tile(*tile_at(9, lon=134.0, lat=45.0)))
+
+
+# -- switching off while a province downloads ------------------------------------------------------
+
+
+def test_switching_off_stops_the_province_being_downloaded_for_it(home, geofabrik):
+    """Nothing more is downloaded for the overlay once it is off, so nothing it downloaded
+    escapes the question: the province in progress stops (and is continued when switched
+    on again), instead of finishing unlisted and staying 7 days."""
+    geofabrik.slow["beijing"] = 1.5
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch, center=(116.4, 40.5))  # in "beijing": that one first
+    lines.settings_changed()
+    assert wait_until(lambda: geofabrik.downloads("beijing") == 1)
+    switch.on = False
+    lines.settings_changed()
+    assert wait_for_question(lines) is None, "nothing was finished for it"
+    assert wait_until(lambda: not lines.extracts.busy("beijing"))
+    assert not lines.extracts.db_path("beijing").exists(), "the download stopped"
+    time.sleep(0.3)
+    assert geofabrik.downloaded() == {"beijing"}, "and nothing else started"
+    switch.on = True
+    lines.settings_changed()
+    question = wait_for_question(lines)
+    assert sorted(question["regions"]) == sorted(PROVINCES), "Beijing too, downloaded when switched on again"
+
+
+def test_switching_off_does_not_stop_a_download_cells_wait_for(home, geofabrik):
+    geofabrik.slow["beijing"] = 1.5
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch, center=(116.4, 40.5))
+    lines.settings_changed()
+    assert wait_until(lambda: geofabrik.downloads("beijing") == 1)
+    cells = threading.Thread(target=for_cells, args=(lines, ["beijing"]))
+    cells.start()  # cells need it too: they wait for the overlay's download
+    time.sleep(0.3)
+    switch.on = False
+    lines.settings_changed()
+    cells.join(10)
+    assert lines.extracts.db_path("beijing").exists(), "the cells got it"
+    assert geofabrik.downloads("beijing") == 1
+    assert wait_for_question(lines) is None, "the cells use it: not asked about"
