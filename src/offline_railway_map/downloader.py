@@ -25,7 +25,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import extracts, overpass, processing
+import requests
+
+from . import extracts, overpass, pmtiles, processing
 from .cells import CellService
 from .extracts import EXTRACT_MIN_CELLS, ExtractStore, ExtractUnavailable
 from .grid import cell_id
@@ -44,6 +46,10 @@ PUBLISH_INTERVAL = 0.5
 PROGRESS_STEP = 0.05
 WORKERS = 3  # cells downloaded at the same time
 PROCESS_AT_ONCE = 1  # cells processed at the same time
+
+
+class BasemapOffline(Exception):
+    """The basemap's server cannot be reached: the cell waits in the queue (SPEC §13)."""
 
 
 class BasemapStage:
@@ -236,6 +242,9 @@ class Downloader:
             except overpass.Offline:
                 self.status.service("overpass", "paused", "无法连接 Overpass 服务器，下载将在恢复联网后继续")
                 self._wait_before_retry(last_job, OFFLINE_RETRY, "无法连接任何 Overpass 服务器，稍后自动重试")
+            except BasemapOffline:
+                self.status.service("basemap", "paused", "无法连接离线底图服务器，下载将在恢复联网后继续")
+                self._wait_before_retry(last_job, OFFLINE_RETRY, "无法连接离线底图服务器，稍后自动重试")
             except ServersBusy:
                 self.status.service("overpass", "paused", "Overpass 服务器繁忙，稍后自动重试")
                 self._wait_before_retry(last_job, BUSY_RETRY, "Overpass 服务器都很忙，稍后自动重试")
@@ -337,10 +346,14 @@ class Downloader:
             if with_basemap:
                 self.cells.set_activity(cid, "下载离线底图（Protomaps）", since=time.time())
                 self._progress(cid, "basemap", rail_share, force=True)
-                basemap_info = self.basemap.fetch(
-                    x, y, work, cancel, lambda p: self._progress(cid, "basemap", rail_share + basemap_share * p),
-                    received,
-                )
+                try:
+                    basemap_info = self.basemap.fetch(
+                        x, y, work, cancel, lambda p: self._progress(cid, "basemap", rail_share + basemap_share * p),
+                        received,
+                    )
+                except (pmtiles.Unreachable, requests.ConnectionError, requests.Timeout) as exc:
+                    raise BasemapOffline(str(exc)) from exc
+                self.status.service("basemap", "ok")
             start = rail_share + basemap_share
             self._progress(cid, "process", start, force=True)
             self._activity(cid, "等待处理（另一格正在处理）", since=time.time())
@@ -359,10 +372,12 @@ class Downloader:
                 self._install(cid, work, result, basemap_info)
             finally:
                 self._processing.release()
-        except (overpass.Cancelled, processing.Cancelled):
+        except (overpass.Cancelled, pmtiles.Cancelled, processing.Cancelled):
+            # Closing, clearing, deleting the cell: not a failure - a cell still in the
+            # queue continues (also after a restart, SPEC §9.5).
             log.info("download of %s cancelled", cid)
             self.cells.clear_live(cid)
-        except (overpass.Offline, BudgetExhausted, ServersBusy):
+        except (overpass.Offline, BasemapOffline, BudgetExhausted, ServersBusy):
             self._requeue(cid, updating)
             raise
         except Exception as exc:

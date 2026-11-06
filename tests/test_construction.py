@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from osmium.osm.mutable import Node, Way
 
 from fakeserver import FakeServer
 from offline_railway_map import construction
+from offline_railway_map import extracts as extracts_module
 from offline_railway_map.construction import ConstructionLines
 from offline_railway_map.coverage import CellCoverage
 from offline_railway_map.extracts import ExtractStore
@@ -78,6 +80,7 @@ class Geofabrik:
         self.data = pbf.read_bytes()
         self.data_for: dict[str, bytes] = {}
         self.slow: dict[str, float] = {}
+        self.cut: dict[str, int] = {}  # region -> bytes after which its next full download breaks
         self.server = FakeServer().start()
         self.server.routes["/index-v1.json"] = lambda r: (
             200, {"Content-Type": "application/json"}, json.dumps(index_json(self.server.url)).encode())
@@ -96,9 +99,16 @@ class Geofabrik:
 
     def _route(self, name: str):
         def route(rec):
+            data = self._data(name)
             if rec.method == "GET":
                 time.sleep(self.slow.get(name, 0.0))
-            return 200, {}, self._data(name)
+                if rec.headers.get("Range"):  # continuing a broken download
+                    start = int(rec.headers["Range"].split("=")[1].split("-")[0])
+                    return 206, {}, data[start:]
+                cut = self.cut.pop(name, None)
+                if cut is not None:
+                    return 200, {"X-Cut-After": str(cut)}, data
+            return 200, {}, data
         return route
 
     def _md5_route(self, name: str):
@@ -594,8 +604,6 @@ def test_switching_on_again_renews_old_lines_from_all_of_china_on_hand(home, geo
 def test_a_download_started_for_the_overlay_is_its_own_even_if_it_stopped_waiting(home, geofabrik):
     """Switched off just as a province arrives, too late to stop it: it still counts as
     downloaded for the overlay, so the question covers it."""
-    from offline_railway_map import extracts as extracts_module
-
     geofabrik.slow["beijing"] = 1.0
     lines = make(home, geofabrik)
     cancel = threading.Event()
@@ -644,3 +652,122 @@ def test_a_package_arriving_before_the_setting_was_ever_on_is_used_when_it_is(ho
     lines.settings_changed()
     assert wait_for_question(lines) is None
     assert lines._built_at("china") > 0 and geofabrik.downloaded() == {"china"}, "the package on hand, no download"
+
+
+
+# -- closing the program midway (a restart: new objects on the same folder) ------------------------
+
+
+def closing(lines: ConstructionLines) -> None:
+    """What closing the program does (core.shutdown)."""
+    lines.extracts.stop(timeout=5.0)
+    lines.stop(timeout=2.0)
+    lines.close()
+
+
+def broken_halfway(geofabrik, monkeypatch, name: str) -> None:
+    """The next download of ``name`` breaks halfway and waits long before continuing."""
+    monkeypatch.setattr(extracts_module, "RETRY_DELAYS", (30,))
+    monkeypatch.setattr(extracts_module, "CHUNK", 64)
+    geofabrik.cut[name] = len(geofabrik.data) // 2
+
+
+def gets(geofabrik, name: str) -> list:
+    return [r for r in geofabrik.server.requests if r.method == "GET" and r.path == f"/{name}.osm.pbf"]
+
+
+def test_closing_while_a_province_downloads_continues_it_after_a_restart(home, geofabrik, monkeypatch):
+    broken_halfway(geofabrik, monkeypatch, "beijing")
+    lines = make(home, geofabrik, center=(116.4, 40.5))  # in "beijing": that one first
+    lines.settings_changed()
+    part = lines.extracts.folder / "beijing.osm.pbf.part"
+    assert wait_until(lambda: part.exists() and part.stat().st_size > 0)
+    closing(lines)
+    have = part.stat().st_size
+    assert 0 < have < len(geofabrik.data) and not lines.extracts.db_path("beijing").exists()
+    again = make(home, geofabrik, center=(116.4, 40.5))
+    again.extracts.remove_stale()  # at program start: a recent half download stays
+    again.start()  # the setting is on
+    question = wait_for_question(again)
+    assert gets(geofabrik, "beijing")[1].headers.get("Range") == f"bytes={have}-", "continued where it stopped"
+    assert len(gets(geofabrik, "beijing")) == 2 and again._built_at("beijing") > 0
+    assert sorted(question["regions"]) == sorted(PROVINCES), "downloaded for it: asked about, Beijing too"
+
+
+def test_a_province_downloaded_but_not_filtered_is_filtered_after_a_restart(home, geofabrik):
+    lines = make(home, geofabrik, center=(116.4, 40.5))
+    home.ensure_dir(lines.extracts.folder)
+    (lines.extracts.folder / "beijing.osm.pbf").write_bytes(geofabrik.data)  # closed while filtering
+    (lines.extracts.folder / "beijing.railways.part").write_bytes(b"half written")
+    lines.extracts.remove_stale()  # at program start
+    lines.start()
+    question = wait_for_question(lines)
+    assert gets(geofabrik, "beijing") == [], "filtered without downloading again"
+    assert lines._built_at("beijing") > 0 and "beijing" in question["regions"]
+    assert not (lines.extracts.folder / "beijing.osm.pbf").exists(), "deleted once filtered"
+
+
+def test_a_province_filtered_but_not_read_before_closing_is_read_after_a_restart(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines._load_region = lambda region, since=0.0: False  # closed before any lines were read
+    lines.settings_changed()
+    first = wait_for_question(lines)
+    assert sorted(first["regions"]) == sorted(PROVINCES) and lines._built_at("beijing") == 0
+    closing(lines)
+    again = make(home, geofabrik)
+    again.start()
+    question = wait_for_question(again)
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES), "read from the filtered packages"
+    assert all(again._built_at(p) > 0 for p in PROVINCES)
+    assert sorted(question["regions"]) == sorted(PROVINCES), "still asked about"
+
+
+def test_a_package_expired_before_it_was_answered_is_not_asked_about(home, geofabrik):
+    lines = make(home, geofabrik)
+    lines.settings_changed()
+    assert wait_for_question(lines) is not None  # closed without answering
+    closing(lines)
+    old = time.time() - 8 * 86400
+    for p in PROVINCES:
+        os.utime(lines.extracts.db_path(p), (old, old))
+    again = make(home, geofabrik)
+    again.extracts.remove_stale()  # at program start: older than 7 days
+    assert again.question() is None, "nothing left to ask about"
+    again.start()
+    assert wait_for_question(again) is None
+    assert all(geofabrik.downloads(p) == 1 for p in PROVINCES), "the lines stay: nothing downloaded again"
+    assert 100 in ids(again.tile(*tile_at(6)))
+
+
+def test_a_province_stopped_when_switched_off_is_continued_by_cells(home, geofabrik, monkeypatch):
+    broken_halfway(geofabrik, monkeypatch, "beijing")
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch, center=(116.4, 40.5))
+    lines.settings_changed()
+    part = lines.extracts.folder / "beijing.osm.pbf.part"
+    assert wait_until(lambda: part.exists() and part.stat().st_size > 0)
+    switch.on = False
+    lines.settings_changed()  # stops it: nobody else waits
+    assert wait_for_question(lines) is None
+    assert wait_until(lambda: not lines.extracts.busy("beijing"))
+    have = part.stat().st_size
+    for_cells(lines, ["beijing"])  # later, cells need Beijing
+    assert gets(geofabrik, "beijing")[-1].headers.get("Range") == f"bytes={have}-", "continued, not again"
+    assert lines.question() is None, "the cells use it: not asked about"
+
+
+def test_switching_off_while_waiting_for_all_of_china_leaves_the_cells_download_alone(home, geofabrik):
+    geofabrik.slow["china"] = 1.5
+    switch = Switch(True)
+    lines = make(home, geofabrik, switch, cells_busy=lambda: True)
+    cells = threading.Thread(target=for_cells, args=(lines, ["china"]))
+    cells.start()
+    assert wait_until(lambda: lines.extracts.busy("china"))
+    lines.settings_changed()  # waits for the cells' China download
+    time.sleep(0.3)
+    switch.on = False
+    lines.settings_changed()
+    assert wait_for_question(lines) is None
+    cells.join(10)
+    assert lines.extracts.fresh("china"), "the cells' download went on"
+    assert geofabrik.downloaded() == {"china"} and geofabrik.downloads("china") == 1

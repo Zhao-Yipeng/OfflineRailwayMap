@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -383,5 +384,121 @@ def test_overlay_first_then_cells_with_all_of_china(home, hooks, overpass, geofa
         assert core.construction._built_at("china") > 0
         assert extracts_left(core) == ["china"]
         assert core.construction.question() is None
+    finally:
+        core.shutdown()
+
+
+# -- closing the program midway ---------------------------------------------------------------------
+
+
+def slow_cells(overpass, seconds: float) -> None:
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    basemap = overpass.routes["/basemap.pmtiles"]
+    overpass.routes["/basemap.pmtiles"] = lambda r: (time.sleep(seconds), basemap(r))[1]
+
+
+def package_gets(geofabrik) -> list[str]:
+    return [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+
+
+def test_closing_midway_continues_the_cells_from_the_filtered_package(home, hooks, overpass, geofabrik, monkeypatch):
+    """Some cells done when the program is closed: after a restart the others continue
+    from the filtered package on disk, even though fewer than six are left."""
+    from offline_railway_map import extracts
+
+    monkeypatch.setenv(extracts.ENV_INDEX, geofabrik.url + "/index-v1.json")
+    slow_cells(overpass, 1.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(SIX, [], (116, 39))
+    assert wait_for(lambda: any(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=60)
+    left = [c for c in SIX if core.store.cell(c)["status"] != "cached"]
+    core.shutdown()
+    assert 0 < len(left) < 6 and package_gets(geofabrik) == ["/china.osm.pbf"]
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        assert wait_for(lambda: all(again.store.cell(c)["status"] == "cached" for c in SIX), timeout=90)
+        assert package_gets(geofabrik) == ["/china.osm.pbf"], "nothing downloaded again"
+        assert overpass.count("/api/interpreter") == 0, "no Overpass for the few cells left"
+    finally:
+        again.shutdown()
+
+
+def test_after_seven_days_the_cells_left_get_a_new_package(home, hooks, overpass, geofabrik, monkeypatch):
+    import os
+
+    from offline_railway_map import extracts
+
+    monkeypatch.setenv(extracts.ENV_INDEX, geofabrik.url + "/index-v1.json")
+    slow_cells(overpass, 3.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(SIX, [], (116, 39))
+    filtered = core.extracts.db_path("china")
+    assert wait_for(filtered.exists, timeout=60)
+    core.shutdown()  # before any cell was done
+    old = time.time() - 8 * 86400
+    os.utime(filtered, (old, old))
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")  # removes it at start
+    try:
+        assert wait_for(lambda: all(again.store.cell(c)["status"] == "cached" for c in SIX), timeout=120)
+        assert package_gets(geofabrik) == ["/china.osm.pbf", "/china.osm.pbf"], "downloaded anew"
+        assert overpass.count("/api/interpreter") == 0
+    finally:
+        again.shutdown()
+
+
+def test_closing_while_a_cell_downloads_its_basemap_does_not_fail_it(home, hooks, overpass):
+    """Closing the program interrupts the cell; it continues after a restart (SPEC §9.5)."""
+    slow_cells(overpass, 3.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(["210-97"], [], (116, 39))
+    assert wait_for(lambda: core.store.cell("210-97")["stage"] == "basemap", timeout=60)
+    core.shutdown()
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        assert again.store.cell("210-97")["status"] in ("queued", "downloading"), again.store.cell("210-97")
+        assert wait_for(lambda: again.store.cell("210-97")["status"] == "cached", timeout=60)
+    finally:
+        again.shutdown()
+
+
+def test_closing_while_a_cell_updates_its_basemap_continues_the_update(home, hooks, overpass):
+    slow_cells(overpass, 0.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(["210-97"], [], (116, 39))
+    assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached", timeout=60)
+    slow_cells(overpass, 3.0)
+    assert core.cells.request_update("210-97", with_basemap=True)
+    assert wait_for(lambda: core.store.cell("210-97")["stage"] == "basemap", timeout=60)
+    core.shutdown()
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        row = again.store.cell("210-97")
+        assert row["status"] == "updating" and row["update_kind"] == "all" and not row["error"], dict(row)
+        assert wait_for(lambda: again.store.cell("210-97")["update_kind"] is None, timeout=60)
+        row = again.store.cell("210-97")
+        assert row["status"] == "cached" and not row["error"], dict(row)
+    finally:
+        again.shutdown()
+
+
+def test_a_cell_waits_while_the_basemap_server_cannot_be_reached(home, hooks, overpass, monkeypatch):
+    """SPEC §13: offline, downloads pause and continue once the network is back - in the
+    basemap step too (the cell used to be marked failed)."""
+    from offline_railway_map import downloader, pmtiles
+
+    monkeypatch.setattr(pmtiles, "RETRY_DELAYS", (0.01,))
+    monkeypatch.setattr(downloader, "OFFLINE_RETRY", 0.5)
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    reachable = core.settings.basemap_source
+    core.settings.basemap_source = "http://127.0.0.1:9/basemap.pmtiles"  # nothing answers there
+    try:
+        core.cells.apply(["210-97"], [], (116, 39))
+        assert wait_for(lambda: "无法连接离线底图服务器" in json.dumps(core.status.snapshot(), ensure_ascii=False))
+        time.sleep(1.5)  # a few more attempts
+        assert core.store.cell("210-97")["status"] in ("queued", "downloading"), "waiting, not failed"
+        core.settings.basemap_source = reachable  # the network is back
+        assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached", timeout=30)
+        assert "无法连接离线底图服务器" not in json.dumps(core.status.snapshot(), ensure_ascii=False)
     finally:
         core.shutdown()

@@ -377,6 +377,34 @@ def test_leftovers_are_removed_at_start_but_recent_downloads_continue(home, geof
     assert recent.exists() and not old.exists() and not unfiltered.exists()
 
 
+def test_a_complete_download_not_yet_filtered_is_filtered_without_downloading_again(home, geofabrik):
+    """Closed while filtering: the checked download stays a day, the half result goes."""
+    store = make_store(home, geofabrik)
+    home.ensure_dir(store.folder)
+    (store.folder / "beijing.osm.pbf").write_bytes(geofabrik.data)
+    (store.folder / "beijing.railways.part").write_bytes(b"half written")
+    store.remove_stale()  # at program start
+    assert (store.folder / "beijing.osm.pbf").exists() and not (store.folder / "beijing.railways.part").exists()
+    elements = store.cell_elements(210, 96, ["beijing"], threading.Event(), no_activity, lambda n: None)
+    assert [e["id"] for e in elements] == [100]
+    assert downloads(geofabrik, "beijing") == 0
+    assert not (store.folder / "beijing.osm.pbf").exists(), "deleted once filtered"
+
+
+def test_a_complete_download_is_kept_one_day(home, geofabrik):
+    import os
+
+    store = make_store(home, geofabrik)
+    home.ensure_dir(store.folder)
+    recent, old = store.folder / "beijing.osm.pbf", store.folder / "tianjin.osm.pbf"
+    for path in (recent, old):
+        path.write_bytes(b"x")
+    two_days_ago = time.time() - 2 * 86400
+    os.utime(old, (two_days_ago, two_days_ago))
+    store.remove_stale()
+    assert recent.exists() and not old.exists()
+
+
 def test_plan_from_the_index(home, geofabrik):
     store = make_store(home, geofabrik)
     assert store.plan([(210, 96)]) == {"210-96": ["beijing"]}
