@@ -12,9 +12,10 @@ on:
         required: false
         default: ""
 
-# A newer push to the same branch replaces a build that is still running.
+# A newer push to the same branch replaces a build that is still running.  Builds
+# started by hand (releases) queue separately: they never cancel the build of a push.
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
