@@ -39,6 +39,10 @@ class ArchiveGone(PMTilesError):
     """The archive URL no longer exists (daily builds rotate)."""
 
 
+class Unreachable(PMTilesError):
+    """The archive's server could not be reached (offline): the download waits and tries again."""
+
+
 class Cancelled(Exception):
     pass
 
@@ -169,16 +173,22 @@ def parse_header(data: bytes) -> Header:
 
 
 class RemoteArchive:
-    def __init__(self, session: requests.Session, url: str, retry_delays: tuple[float, ...] = RETRY_DELAYS) -> None:
+    def __init__(
+        self,
+        session: requests.Session,
+        url: str,
+        retry_delays: tuple[float, ...] | None = None,
+        cancel: threading.Event | None = None,
+    ) -> None:
         self.session = session
         self.url = url
-        self.retry_delays = retry_delays
+        self.retry_delays = RETRY_DELAYS if retry_delays is None else retry_delays
         self._leaves: OrderedDict[tuple[int, int], list[Entry]] = OrderedDict()
         self._lock = threading.Lock()
-        self.header = parse_header(self.read(0, HEADER_SIZE))
+        self.header = parse_header(self.read(0, HEADER_SIZE, cancel))
         if self.header.internal_compression not in (COMPRESSION_NONE, COMPRESSION_GZIP):
             raise PMTilesError("unsupported directory compression")
-        self.root = parse_directory(self.read(self.header.root_offset, self.header.root_length),
+        self.root = parse_directory(self.read(self.header.root_offset, self.header.root_length, cancel),
                                     self.header.internal_compression)
 
     def read(self, offset: int, length: int, cancel: threading.Event | None = None) -> bytes:
@@ -206,6 +216,8 @@ class RemoteArchive:
                         raise Cancelled()
                 else:
                     time.sleep(delay)
+        if isinstance(problem, (requests.ConnectionError, requests.Timeout)):
+            raise Unreachable(f"range request failed: {problem}")
         raise PMTilesError(f"range request failed: {problem}")
 
     def _leaf(self, entry: Entry, cancel) -> list[Entry]:

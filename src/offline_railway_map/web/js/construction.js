@@ -22,7 +22,8 @@ export async function askAboutExtracts(question) {
       ],
     });
     if (answer === null) return; // closed: asked again at the next start
-    const result = await api.post('/api/construction/decide', { delete: answer === 'delete' });
+    const result = await api.post('/api/construction/decide',
+      { delete: answer === 'delete', regions: question.regions });
     if (answer === 'keep') toast('这些数据包保留 7 天');
     else if (result.deleted) {
       toast(`已删除 ${result.deleted} 个数据包，释放 ${formatBytes(result.bytes)}`

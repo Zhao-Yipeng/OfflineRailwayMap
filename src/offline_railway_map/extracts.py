@@ -13,7 +13,9 @@ Overpass returns; the extracts are updated once a day.
   "dach"); the parent (one download) replaces its children when it is not
   much bigger than the children needed anyway; a region that is large
   compared with the cells it serves is not used, and those cells keep using
-  Overpass;
+  Overpass; regions on disk or being downloaded already (for other cells or
+  the construction overlay) cost nothing, so they are used rather than
+  downloading another region with the same data;
 * download: ``data/extracts/<region>.osm.pbf``, resumed after interruptions
   and checked against Geofabrik's ``.md5``; then filtered with osmium into
   ``data/extracts/<region>.railways.sqlite`` (the objects our Overpass query
@@ -199,8 +201,17 @@ class RegionIndex:
         return [region for region, _part in chosen]
 
 
-def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Region], int | None]) -> dict[str, list[str]]:
-    """Cell id -> region ids to read it from; cells left out use Overpass."""
+def plan(
+    index: RegionIndex,
+    cells: list[tuple[int, int]],
+    size_of: Callable[[Region], int | None],
+    on_hand: Callable[[Region], bool] = lambda region: False,
+) -> dict[str, list[str]]:
+    """Cell id -> region ids to read it from; cells left out use Overpass.
+
+    ``on_hand``: the region is on disk already, or being downloaded (for
+    other cells or the construction overlay): using it costs no download.
+    """
     needs: dict[str, list[Region]] = {cell_id(x, y): index.most_specific(x, y) for x, y in cells}
     needs = {cid: regions for cid, regions in needs.items() if regions}
 
@@ -221,6 +232,8 @@ def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Re
                 counts[region.id] = counts.get(region.id, 0) + 1
         too_big = set()
         for rid, count in counts.items():
+            if on_hand(index.regions[rid]):
+                continue
             size = mb(index.regions[rid])
             if size is not None and size / count > MAX_MB_PER_CELL:
                 too_big.add(rid)
@@ -229,17 +242,23 @@ def plan(index: RegionIndex, cells: list[tuple[int, int]], size_of: Callable[[Re
         needs = {cid: regions for cid, regions in needs.items() if not any(r.id in too_big for r in regions)}
 
     # A parent (one download) replaces its children when it is not much bigger
-    # than the children needed anyway; without sizes, when half of them are needed.
+    # than the children still to be downloaded; without sizes, when half of
+    # them are.  A parent on hand replaces children that are not.
     def worth_parent(parent: Region, kids: list[Region]) -> bool:
-        if len(kids) < 2:
+        missing = [k for k in kids if not on_hand(k)]
+        if not missing:
+            return False
+        if on_hand(parent):
+            return True
+        if len(missing) < 2:
             return False
         parent_size = size_of(parent)
-        kid_sizes = [size_of(k) for k in kids]
+        kid_sizes = [size_of(k) for k in missing]
         if parent_size is not None and None not in kid_sizes:
             if parent_size / (1024 * 1024) / cells_using({k.id for k in kids}) > MAX_MB_PER_CELL:
                 return False
             return parent_size <= 1.25 * sum(kid_sizes)
-        return len(kids) * 2 >= len(parent.children)
+        return len(missing) * 2 >= len(parent.children)
 
     changed = True
     while changed:
@@ -421,8 +440,10 @@ def read_cell(db: Path, cx: int, cy: int) -> list[dict]:
 class _RegionJob:
     """One region being downloaded and filtered, shared by every cell that needs it."""
 
-    def __init__(self) -> None:
+    def __init__(self, for_overlay: bool = False) -> None:
         self.done = threading.Event()
+        self.stop = threading.Event()  # set: stop downloading and filtering (see ExtractStore.stop, abandon)
+        self.for_overlay = for_overlay  # started by the construction overlay
         self.error: Exception | None = None
         self.text = ""
         self.fraction = 0.0
@@ -442,12 +463,14 @@ class ExtractStore:
         self._jobs: dict[str, _RegionJob] = {}
         self._lock = threading.Lock()
         self._failed_until: dict[str, float] = {}
-        self._stop = threading.Event()
+        self._stopping = False  # stop() in progress: jobs started meanwhile stop at once
         self._cell_used: set[str] = set()  # regions cell downloads used while the program runs
         # Hooks for the construction overlay (construction.py): a region was
-        # filtered (by anyone), or cells are about to use a region.
+        # filtered (by anyone), cells are about to use a region, or a download the
+        # overlay started has arrived (also if the overlay stopped waiting for it).
         self.on_filtered: Callable[[str], None] = lambda rid: None
         self.on_cell_use: Callable[[str], None] = lambda rid: None
+        self.on_downloaded_for_overlay: Callable[[str], None] = lambda rid: None
 
     @property
     def folder(self) -> Path:
@@ -480,8 +503,10 @@ class ExtractStore:
         return self._sizes[region.id]
 
     def plan(self, cells: list[tuple[int, int]]) -> dict[str, list[str]]:
+        """Regions for the cells, preferring what is on disk or being downloaded already
+        (for other cells or the construction overlay): nothing is downloaded twice."""
         index = self.index()
-        return plan(index, cells, self.size_of)
+        return plan(index, cells, self.size_of, lambda region: self.on_hand(region.id))
 
     def fresh(self, rid: str) -> bool:
         """True if the region was filtered recently enough to be used."""
@@ -489,6 +514,10 @@ class ExtractStore:
         if self.home.blocked or not path.exists():
             return False
         return time.time() - path.stat().st_mtime < REUSE_FOR
+
+    def on_hand(self, rid: str) -> bool:
+        """True if the region is on disk (filtered recently) or being downloaded."""
+        return self.fresh(rid) or self.busy(rid)
 
     def usable(self, rid: str) -> bool:
         return time.time() >= self._failed_until.get(rid, 0.0)
@@ -501,6 +530,13 @@ class ExtractStore:
         return any(
             p.name.endswith(".railways.sqlite") and now - p.stat().st_mtime < REUSE_FOR for p in self.folder.iterdir()
         )
+
+    def any_on_hand(self) -> bool:
+        """True if some region is on disk or being downloaded."""
+        with self._lock:
+            if self._jobs:
+                return True
+        return self.any_fresh()
 
     # -- getting a cell's data -----------------------------------------------------------------
 
@@ -540,7 +576,29 @@ class ExtractStore:
         Returns True if this call downloaded them, False if they were there
         already or another download (of cells) brought them.
         """
-        return self._ensure(rid, cancel, activity, lambda n: None, lambda f: None)
+        return self._ensure(rid, cancel, activity, lambda n: None, lambda f: None, for_overlay=True)
+
+    def abandon(self, rid: str) -> _RegionJob | None:
+        """The construction overlay was switched off: stop the region's download if the
+        overlay started it and nobody waits for it any more; that job, else None.  What
+        arrived so far is kept and continued next time (``PARTIAL_KEPT_FOR``).  A job past
+        its last check may still finish."""
+        with self._lock:
+            job = self._jobs.get(rid)
+            if job is not None and job.for_overlay and not job.listeners:
+                job.stop.set()
+                return job
+            return None
+
+    def share(self, rid: str, cancel: threading.Event, activity: Activity) -> bool:
+        """Use the region if it is on disk, or once the download running for it is done;
+        never starts a download (construction overlay: all of China's extract, which
+        only cells download).  True if the region is on disk now."""
+        try:
+            self._ensure(rid, cancel, activity, lambda n: None, lambda f: None, start=False)
+        except ExtractUnavailable:
+            return False
+        return self.fresh(rid)
 
     def used_by_cells(self, rid: str) -> bool:
         return rid in self._cell_used
@@ -552,25 +610,29 @@ class ExtractStore:
         activity: Activity,
         received: Callable[[int], None],
         progress: Callable[[float], None],
+        start: bool = True,
+        for_overlay: bool = False,
     ) -> bool:
         if self.fresh(rid):
             return False
         name = self.index().regions[rid].name if rid in self.index().regions else rid
-        with self._lock:
-            job = self._jobs.get(rid)
-            # Checked again under the lock: a job that just finished has written
-            # the region and left _jobs, and must not be started a second time.
-            if job is None and self.fresh(rid):
-                return False
-            starter = job is None
-            if starter:
-                job = self._jobs[rid] = _RegionJob()
 
         def tell(text: str, fraction: float) -> None:
             activity(text)
             progress(fraction)
 
-        job.listeners.append(tell)
+        with self._lock:
+            job = self._jobs.get(rid)
+            # Checked again under the lock: a job that just finished has written
+            # the region and left _jobs, and must not be started a second time.
+            if job is None and (not start or self.fresh(rid)):
+                return False
+            starter = job is None
+            if starter:
+                job = self._jobs[rid] = _RegionJob(for_overlay)
+                if self._stopping:
+                    job.stop.set()
+            job.listeners.append(tell)  # under the lock: abandon() sees who waits
         try:
             if starter:
                 thread = threading.Thread(
@@ -595,7 +657,7 @@ class ExtractStore:
             for listener in list(job.listeners):
                 listener(text, fraction)
 
-        stop = self._stop  # this job's stop signal, even if a later stop() makes a new one
+        stop = job.stop
         filtered = False
         try:
             region = self.index().regions[rid]
@@ -610,7 +672,12 @@ class ExtractStore:
             )
             pbf.unlink(missing_ok=True)
             filtered = True
-        except Cancelled:  # closing or clearing: not a failure of the region
+            if job.for_overlay:
+                try:
+                    self.on_downloaded_for_overlay(rid)
+                except Exception:  # noqa: BLE001 - a listener must not break downloads
+                    log.exception("after downloading %s", rid)
+        except Cancelled:  # closing, clearing, overlay switched off: not a failure of the region
             job.error = ExtractUnavailable(f"地区数据包「{name}」已停止")
         except Exception as exc:  # noqa: BLE001 - every cell waiting falls back to Overpass
             log.warning("extract %s failed: %s", rid, exc)
@@ -735,11 +802,15 @@ class ExtractStore:
 
     def stop(self, timeout: float = 15.0) -> None:
         """Stop downloads and filtering (closing, clearing the cache); later jobs may start again."""
-        self._stop.set()
+        with self._lock:
+            self._stopping = True
+            for job in self._jobs.values():
+                job.stop.set()
         end = time.monotonic() + timeout
         while self._jobs and time.monotonic() < end:
             time.sleep(0.1)
-        self._stop = threading.Event()
+        with self._lock:
+            self._stopping = False
 
     def forget(self) -> None:
         """After 「清空缓存」: nothing is known about local files any more."""

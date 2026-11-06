@@ -447,7 +447,10 @@ class AppCore:
         data = req.json() or {}
         if not isinstance(data.get("delete"), bool):
             return error_response(400, "delete must be true or false")
-        return json_response(self.construction.decide(data["delete"]))
+        regions = data.get("regions")  # the ones the question listed
+        if regions is not None and not (isinstance(regions, list) and all(isinstance(r, str) for r in regions)):
+            return error_response(400, "regions must be a list of region ids")
+        return json_response(self.construction.decide(data["delete"], regions))
 
     def _tile_construction(self, req: Request) -> Response:
         p = req.params

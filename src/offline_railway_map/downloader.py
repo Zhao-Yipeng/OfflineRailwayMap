@@ -9,7 +9,8 @@ time, which bounds memory and CPU use.
 
 The railway data comes from regional extracts (extracts.py) when many cells
 are waiting (``EXTRACT_MIN_CELLS``) or the cell's regions are already on
-disk, otherwise from Overpass; if an extract cannot be used, from Overpass.
+disk or being downloaded, otherwise from Overpass; if an extract cannot be
+used, from Overpass.
 
 Work happens in ``data/tmp/<cell>``; the cell only becomes "cached" once
 everything is in place, so the page never shows half a cell.
@@ -24,9 +25,12 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import extracts, overpass, processing
+import requests
+
+from . import extracts, overpass, pmtiles, processing
 from .cells import CellService
 from .extracts import EXTRACT_MIN_CELLS, ExtractStore, ExtractUnavailable
+from .grid import cell_id
 from .net import NetStatus
 from .overpass import BudgetExhausted, OverpassClient, ServersBusy
 from .paths import Home
@@ -42,6 +46,10 @@ PUBLISH_INTERVAL = 0.5
 PROGRESS_STEP = 0.05
 WORKERS = 3  # cells downloaded at the same time
 PROCESS_AT_ONCE = 1  # cells processed at the same time
+
+
+class BasemapOffline(Exception):
+    """The basemap's server cannot be reached: the cell waits in the queue (SPEC §13)."""
 
 
 class BasemapStage:
@@ -112,10 +120,12 @@ class Downloader:
             self._threads.append(thread)
 
     def planned_regions(self) -> set[str]:
-        """Regions waiting cells may read: kept when the construction overlay deletes
-        what it downloaded for itself (construction.py), or they would be downloaded
-        again.  Every region a waiting cell touches counts (also for fewer than
-        EXTRACT_MIN_CELLS cells, which use regions already on disk)."""
+        """Regions waiting cells may read: shared with the construction overlay, so it
+        neither asks about them nor deletes them with what it downloaded for itself
+        (construction.py); they would be downloaded again.  A cell the current plan
+        covers reads the regions planned for it (all of China, say, and not its
+        province); for any other cell every region it touches counts (fewer than
+        EXTRACT_MIN_CELLS cells also read regions on disk)."""
         pending = self.store.pending_cells()
         if not pending or self.extracts is None:
             return set()
@@ -123,7 +133,12 @@ class Downloader:
             index = self.extracts.index()
         except Exception:  # noqa: BLE001 - no index, no extracts in use
             return set()
-        return {region.id for x, y in pending for region in index.most_specific(x, y)}
+        plan = self._plan or {}  # replaced as a whole when planned again: read without the lock
+        regions: set[str] = set()
+        for x, y in pending:
+            planned = plan.get(cell_id(x, y))
+            regions.update(planned if planned is not None else (r.id for r in index.most_specific(x, y)))
+        return regions
 
     def queue_changed(self) -> None:
         """Cells were added or removed: plan the data sources again, and get going."""
@@ -227,6 +242,9 @@ class Downloader:
             except overpass.Offline:
                 self.status.service("overpass", "paused", "无法连接 Overpass 服务器，下载将在恢复联网后继续")
                 self._wait_before_retry(last_job, OFFLINE_RETRY, "无法连接任何 Overpass 服务器，稍后自动重试")
+            except BasemapOffline:
+                self.status.service("basemap", "paused", "无法连接离线底图服务器，下载将在恢复联网后继续")
+                self._wait_before_retry(last_job, OFFLINE_RETRY, "无法连接离线底图服务器，稍后自动重试")
             except ServersBusy:
                 self.status.service("overpass", "paused", "Overpass 服务器繁忙，稍后自动重试")
                 self._wait_before_retry(last_job, BUSY_RETRY, "Overpass 服务器都很忙，稍后自动重试")
@@ -271,13 +289,14 @@ class Downloader:
                     log.info("%d of %d waiting cells get their railway data from regional extracts",
                              len(self._plan), len(pending))
             regions = self._plan.get(cid)
-            if regions is None and self.extracts.any_fresh():
-                # Regions downloaded recently are used even for a few cells.
+            if regions is None and self.extracts.any_on_hand():
+                # Regions on disk (filtered within 7 days) or being downloaded - for other
+                # cells or the construction overlay - are used even for a few cells.
                 try:
                     regions = self.extracts.plan([(x, y)]).get(cid)
                 except Exception:  # noqa: BLE001 - Overpass then
                     regions = None
-                if regions and not all(self.extracts.fresh(r) for r in regions):
+                if regions and not all(self.extracts.on_hand(r) for r in regions):
                     regions = None
         if regions and all(self.extracts.usable(r) for r in regions):
             return regions
@@ -327,10 +346,14 @@ class Downloader:
             if with_basemap:
                 self.cells.set_activity(cid, "下载离线底图（Protomaps）", since=time.time())
                 self._progress(cid, "basemap", rail_share, force=True)
-                basemap_info = self.basemap.fetch(
-                    x, y, work, cancel, lambda p: self._progress(cid, "basemap", rail_share + basemap_share * p),
-                    received,
-                )
+                try:
+                    basemap_info = self.basemap.fetch(
+                        x, y, work, cancel, lambda p: self._progress(cid, "basemap", rail_share + basemap_share * p),
+                        received,
+                    )
+                except (pmtiles.Unreachable, requests.ConnectionError, requests.Timeout) as exc:
+                    raise BasemapOffline(str(exc)) from exc
+                self.status.service("basemap", "ok")
             start = rail_share + basemap_share
             self._progress(cid, "process", start, force=True)
             self._activity(cid, "等待处理（另一格正在处理）", since=time.time())
@@ -349,10 +372,12 @@ class Downloader:
                 self._install(cid, work, result, basemap_info)
             finally:
                 self._processing.release()
-        except (overpass.Cancelled, processing.Cancelled):
+        except (overpass.Cancelled, pmtiles.Cancelled, processing.Cancelled):
+            # Closing, clearing, deleting the cell: not a failure - a cell still in the
+            # queue continues (also after a restart, SPEC §9.5).
             log.info("download of %s cancelled", cid)
             self.cells.clear_live(cid)
-        except (overpass.Offline, BudgetExhausted, ServersBusy):
+        except (overpass.Offline, BasemapOffline, BudgetExhausted, ServersBusy):
             self._requeue(cid, updating)
             raise
         except Exception as exc:

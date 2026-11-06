@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -258,5 +259,246 @@ def test_extract_failure_falls_back_to_overpass(home, hooks, overpass, geofabrik
             core.store.cell(c)["status"] for c in SIX
         ]
         assert overpass.count("/api/interpreter") == 6 * 4, "every cell came from Overpass in the end"
+    finally:
+        core.shutdown()
+
+
+def test_a_few_cells_share_an_extract_being_downloaded(home, hooks, overpass, geofabrik):
+    """Fewer than six cells use an extract that is being downloaded (here: for the
+    construction overlay) instead of asking Overpass: nothing is downloaded twice."""
+    import threading
+
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    serve = geofabrik.routes["/tianjin.osm.pbf"]
+    geofabrik.routes["/tianjin.osm.pbf"] = lambda r: (time.sleep(1.0 if r.method == "GET" else 0), serve(r))[1]
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        overlay = threading.Thread(target=core.extracts.ensure, args=("tianjin", threading.Event(), lambda *a: None))
+        overlay.start()
+        assert wait_for(lambda: core.extracts.busy("tianjin"))
+        core.cells.apply(["210-97"], [], (116, 39))  # in "tianjin"
+        assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached", timeout=60)
+        overlay.join(10)
+        assert overpass.count("/api/interpreter") == 0, "no Overpass queries"
+        downloads = [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+        assert downloads == ["/tianjin.osm.pbf"]
+    finally:
+        core.shutdown()
+
+
+def test_cells_and_the_construction_overlay_share_all_of_china(home, hooks, overpass, geofabrik):
+    """Many cells chose all of China's extract while 「永远显示在建线路」 waited for them
+    (SPEC §7.9): the overlay reads every province from it instead of downloading them."""
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    try:
+        core.cells.apply(SIX, [], (116, 39))
+        assert wait_for(lambda: core.downloader.busy)
+        core.settings.always_show_construction = True
+        core.construction.settings_changed()
+        assert wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=60)
+        assert wait_for(lambda: not core.construction._thread.is_alive(), timeout=30)
+        downloads = [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+        assert downloads == ["/china.osm.pbf"], downloads
+        assert core.construction._built_at("china") > 0, "the overlay read it"
+        assert core.construction.question() is None, "nothing was downloaded for the overlay alone"
+        # switching on again later downloads nothing either
+        core.construction.settings_changed()
+        assert wait_for(lambda: not core.construction._thread.is_alive(), timeout=30)
+        assert len([r for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]) == 1
+    finally:
+        core.shutdown()
+
+
+def overlay_first_then_cells(home, hooks, overpass, geofabrik, sizes):
+    """「永远显示在建线路」 is switched on first; while it downloads its first province
+    (Beijing, in view), six cells are selected: it waits for them, then goes on
+    (SPEC §7.9).  Returns once it is done (cells may still be at work) with the core,
+    the times each extract was requested and the question it asked."""
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    basemap = overpass.routes["/basemap.pmtiles"]
+    overpass.routes["/basemap.pmtiles"] = lambda r: (time.sleep(1.0), basemap(r))[1]  # cells take a while
+    got: dict[str, list[float]] = {}
+    for path in [p for p in geofabrik.routes if p.endswith(".osm.pbf")]:
+        def route(rec, serve=geofabrik.routes[path], name=path[1:-len(".osm.pbf")]):
+            if rec.method == "GET":
+                got.setdefault(name, []).append(time.time())
+                if name == "beijing":
+                    time.sleep(1.5)  # still downloading when the cells are selected
+            return serve(rec)
+        geofabrik.routes[path] = route
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.extracts.index_url = geofabrik.url + "/index-v1.json"
+    core.extracts._sizes.update(sizes)  # what HEAD requests to Geofabrik would say
+    asked: list[dict] = []
+    publish = core.construction.on_question
+    core.construction.on_question = lambda question: (asked.append(question), publish(question))
+    core.settings.last_view = (116.4, 40.5, 6.0)  # in "beijing"
+    core.settings.always_show_construction = True
+    core.construction.settings_changed()
+    assert wait_for(lambda: "beijing" in got)
+    core.cells.apply(SIX, [], (116, 39))  # they need beijing, tianjin, east1 and west2
+    assert wait_for(lambda: not core.construction._thread.is_alive(), timeout=90)
+    return core, got, asked[-1] if asked else None
+
+
+def all_cached(core) -> bool:
+    return wait_for(lambda: all(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=90)
+
+
+def extracts_left(core) -> list[str]:
+    return sorted(p.name.split(".")[0] for p in core.extracts.folder.glob("*.railways.sqlite"))
+
+
+def test_overlay_first_then_cells_with_provinces(home, hooks, overpass, geofabrik):
+    sizes = {"china": 3000 * 2**20, **{p: 50 * 2**20 for p in ("beijing", "tianjin", "east1", "west1", "west2", "east2")}}
+    core, got, question = overlay_first_then_cells(home, hooks, overpass, geofabrik, sizes)
+    try:
+        assert all_cached(core)
+        assert all(len(times) == 1 for times in got.values()), f"each extract downloaded once: {got}"
+        assert set(got) == {"beijing", "tianjin", "east1", "west2", "east2", "west1"}, "every province, no China"
+        done = max(core.store.cell(c)["rail_at"] for c in SIX)
+        assert min(got["east2"] + got["west1"]) > done, "the overlay's own provinces only after the cells"
+        assert sorted(question["regions"]) == ["east2", "west1"], "Beijing went to the cells too"
+        result = core.construction.decide(True, question["regions"])
+        assert result["deleted"] == 2 and result["kept"] == 0
+        assert extracts_left(core) == ["beijing", "east1", "tianjin", "west2"], "the cells' extracts stay"
+        assert core.construction.question() is None
+    finally:
+        core.shutdown()
+
+
+def test_overlay_first_then_cells_with_all_of_china(home, hooks, overpass, geofabrik):
+    sizes = {"china": 120 * 2**20, **{p: 50 * 2**20 for p in ("beijing", "tianjin", "east1", "west1", "west2", "east2")}}
+    core, got, question = overlay_first_then_cells(home, hooks, overpass, geofabrik, sizes)
+    try:
+        assert core.store.pending_cells(), "the overlay was done before the cells (they still use China)"
+        assert question["regions"] == ["beijing"], "downloaded only for the overlay: the cells read China"
+        result = core.construction.decide(True, question["regions"])  # answered at once
+        assert result["deleted"] == 1 and result["kept"] == 0
+        assert all_cached(core)
+        assert all(len(times) == 1 for times in got.values()), f"each extract downloaded once: {got}"
+        assert set(got) == {"beijing", "china"}, "after Beijing, all of China for the cells and the overlay"
+        assert core.construction._built_at("china") > 0
+        assert extracts_left(core) == ["china"]
+        assert core.construction.question() is None
+    finally:
+        core.shutdown()
+
+
+# -- closing the program midway ---------------------------------------------------------------------
+
+
+def slow_cells(overpass, seconds: float) -> None:
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    basemap = overpass.routes["/basemap.pmtiles"]
+    overpass.routes["/basemap.pmtiles"] = lambda r: (time.sleep(seconds), basemap(r))[1]
+
+
+def package_gets(geofabrik) -> list[str]:
+    return [r.path for r in geofabrik.requests if r.method == "GET" and r.path.endswith(".osm.pbf")]
+
+
+def test_closing_midway_continues_the_cells_from_the_filtered_package(home, hooks, overpass, geofabrik, monkeypatch):
+    """Some cells done when the program is closed: after a restart the others continue
+    from the filtered package on disk, even though fewer than six are left."""
+    from offline_railway_map import extracts
+
+    monkeypatch.setenv(extracts.ENV_INDEX, geofabrik.url + "/index-v1.json")
+    slow_cells(overpass, 1.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(SIX, [], (116, 39))
+    assert wait_for(lambda: any(core.store.cell(c)["status"] == "cached" for c in SIX), timeout=60)
+    left = [c for c in SIX if core.store.cell(c)["status"] != "cached"]
+    core.shutdown()
+    assert 0 < len(left) < 6 and package_gets(geofabrik) == ["/china.osm.pbf"]
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        assert wait_for(lambda: all(again.store.cell(c)["status"] == "cached" for c in SIX), timeout=90)
+        assert package_gets(geofabrik) == ["/china.osm.pbf"], "nothing downloaded again"
+        assert overpass.count("/api/interpreter") == 0, "no Overpass for the few cells left"
+    finally:
+        again.shutdown()
+
+
+def test_after_seven_days_the_cells_left_get_a_new_package(home, hooks, overpass, geofabrik, monkeypatch):
+    import os
+
+    from offline_railway_map import extracts
+
+    monkeypatch.setenv(extracts.ENV_INDEX, geofabrik.url + "/index-v1.json")
+    slow_cells(overpass, 3.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(SIX, [], (116, 39))
+    filtered = core.extracts.db_path("china")
+    assert wait_for(filtered.exists, timeout=60)
+    core.shutdown()  # before any cell was done
+    old = time.time() - 8 * 86400
+    os.utime(filtered, (old, old))
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")  # removes it at start
+    try:
+        assert wait_for(lambda: all(again.store.cell(c)["status"] == "cached" for c in SIX), timeout=120)
+        assert package_gets(geofabrik) == ["/china.osm.pbf", "/china.osm.pbf"], "downloaded anew"
+        assert overpass.count("/api/interpreter") == 0
+    finally:
+        again.shutdown()
+
+
+def test_closing_while_a_cell_downloads_its_basemap_does_not_fail_it(home, hooks, overpass):
+    """Closing the program interrupts the cell; it continues after a restart (SPEC §9.5)."""
+    slow_cells(overpass, 3.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(["210-97"], [], (116, 39))
+    assert wait_for(lambda: core.store.cell("210-97")["stage"] == "basemap", timeout=60)
+    core.shutdown()
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        assert again.store.cell("210-97")["status"] in ("queued", "downloading"), again.store.cell("210-97")
+        assert wait_for(lambda: again.store.cell("210-97")["status"] == "cached", timeout=60)
+    finally:
+        again.shutdown()
+
+
+def test_closing_while_a_cell_updates_its_basemap_continues_the_update(home, hooks, overpass):
+    slow_cells(overpass, 0.0)
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    core.cells.apply(["210-97"], [], (116, 39))
+    assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached", timeout=60)
+    slow_cells(overpass, 3.0)
+    assert core.cells.request_update("210-97", with_basemap=True)
+    assert wait_for(lambda: core.store.cell("210-97")["stage"] == "basemap", timeout=60)
+    core.shutdown()
+    again = make_core(home, hooks, overpass.url + "/api/interpreter")
+    try:
+        row = again.store.cell("210-97")
+        assert row["status"] == "updating" and row["update_kind"] == "all" and not row["error"], dict(row)
+        assert wait_for(lambda: again.store.cell("210-97")["update_kind"] is None, timeout=60)
+        row = again.store.cell("210-97")
+        assert row["status"] == "cached" and not row["error"], dict(row)
+    finally:
+        again.shutdown()
+
+
+def test_a_cell_waits_while_the_basemap_server_cannot_be_reached(home, hooks, overpass, monkeypatch):
+    """SPEC §13: offline, downloads pause and continue once the network is back - in the
+    basemap step too (the cell used to be marked failed)."""
+    from offline_railway_map import downloader, pmtiles
+
+    monkeypatch.setattr(pmtiles, "RETRY_DELAYS", (0.01,))
+    monkeypatch.setattr(downloader, "OFFLINE_RETRY", 0.5)
+    overpass.routes["/api/interpreter"] = lambda r: (200, {"Content-Type": "application/json"}, overpass_json())
+    core = make_core(home, hooks, overpass.url + "/api/interpreter")
+    reachable = core.settings.basemap_source
+    core.settings.basemap_source = "http://127.0.0.1:9/basemap.pmtiles"  # nothing answers there
+    try:
+        core.cells.apply(["210-97"], [], (116, 39))
+        assert wait_for(lambda: "无法连接离线底图服务器" in json.dumps(core.status.snapshot(), ensure_ascii=False))
+        time.sleep(1.5)  # a few more attempts
+        assert core.store.cell("210-97")["status"] in ("queued", "downloading"), "waiting, not failed"
+        core.settings.basemap_source = reachable  # the network is back
+        assert wait_for(lambda: core.store.cell("210-97")["status"] == "cached", timeout=30)
+        assert "无法连接离线底图服务器" not in json.dumps(core.status.snapshot(), ensure_ascii=False)
     finally:
         core.shutdown()

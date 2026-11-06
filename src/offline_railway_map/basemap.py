@@ -96,11 +96,11 @@ class BasemapFetcher(BasemapStage):
         self._archives: dict[str, RemoteArchive] = {}
         self._lock = threading.Lock()
 
-    def _archive(self, url: str) -> RemoteArchive:
+    def _archive(self, url: str, cancel: threading.Event | None = None) -> RemoteArchive:
         with self._lock:
             archive = self._archives.get(url)
         if archive is None:
-            archive = RemoteArchive(self.session, url)
+            archive = RemoteArchive(self.session, url, cancel=cancel)
             with self._lock:
                 self._archives = {url: archive}  # keep only the current build
         return archive
@@ -123,7 +123,7 @@ class BasemapFetcher(BasemapStage):
         for attempt in (1, 2):
             key, url = self.selector.current()
             try:
-                archive = self._archive(url)
+                archive = self._archive(url, cancel)
                 return self._extract(archive, key, x, y, work, cancel, progress, received or (lambda n: None))
             except ArchiveGone:
                 if attempt == 2 or self.selector.source() != "auto":
