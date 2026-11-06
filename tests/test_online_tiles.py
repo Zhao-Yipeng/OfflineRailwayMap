@@ -145,6 +145,27 @@ def test_tiles_inside_cached_cells_are_never_requested(home, fake):
     tiles.close()
 
 
+def test_online_basemap_below_z8_is_shown_even_inside_cached_cells(home, fake):
+    """While online, the page draws the online basemap everywhere below z8 and the offline
+    one only from z8 (SPEC 7.7): a z7 tile covered by cached cells must not come back
+    empty, or the middle of a large downloaded area is blank at those zooms."""
+    tilejson(fake, "v1")
+    fake.default = lambda r: (
+        (200, {"Content-Type": "application/x-protobuf"}, MVT) if r.path.startswith("/v1/")
+        else (200, {"Content-Type": "image/png"}, RED)
+    )
+    coverage = CellCoverage({(x, y) for x in (210, 211) for y in (96, 97)})  # all of z7 tile (105, 48)
+    tiles, _ = make_tiles(home, fake.url, coverage)
+    assert coverage.tile_mask(7, 105, 48).full
+    assert tiles.tile("ofm", 7, 105, 48) == MVT, "z7: the online basemap is shown"
+    assert tiles.tile("ofm", 5, 26, 12) == MVT
+    assert tiles.tile("ofm", 8, 210, 97) == b"" and tiles.tile("ofm", 12, 210 * 16, 97 * 16) == b"", \
+        "from z8 the offline basemap is drawn there: not requested"
+    assert tiles.tile("orm", 7, 105, 48) == TRANSPARENT_PNG, "the railways come from the cached cells"
+    assert fake.count("/orm/") == 0
+    tiles.close()
+
+
 def test_partially_cached_tile_is_masked(home, fake):
     fake.default = lambda r: (200, {"Content-Type": "image/png"}, RED)
     # z7 tile (105, 48) contains cells x 210-211, y 96-97; cache the bottom-left one.

@@ -121,17 +121,39 @@ async function boot() {
     },
     cell: (row) => { cells.updateCell(row); renderDownloadPanel(cells); },
     settings: applySettings,
-    construction: ({ version }) => refreshConstruction(map, version),
+    construction: ({ version }) => {
+      refreshConstruction(map, version);
+      settleTiles(map, ['construction']);
+    },
     'construction-question': askAboutExtracts,
     tiles: ({ version }) => {
       refreshOnlineLayers(map, version);
       refreshRailLayers(map, version);
       refreshBasemap(map, version);
+      settleTiles(map, ['online', 'orm', 'rail', 'construction', 'basemap']);
     },
   });
   document.body.dataset.mapReady = 'true';
   // A question about the overlay's extracts left unanswered last time (SPEC §7.9).
   api.get('/api/construction').then(({ question }) => askAboutExtracts(question)).catch(() => {});
+}
+
+// MapLibre keeps the data a tile was still loading when its source was refreshed
+// (it parses that response again instead of asking for the new one), so a tile
+// asked for just before a cell was installed could stay empty.  Once the map is
+// idle - nothing loading any more - the refreshed sources are refreshed once more.
+const settling = new Set();
+
+function settleTiles(map, ids) {
+  const fresh = ids.filter((id) => !settling.has(id));
+  if (!fresh.length) return;
+  for (const id of fresh) settling.add(id);
+  map.once('idle', () => {
+    for (const id of fresh) {
+      settling.delete(id);
+      if (map.getSource(id)) map.refreshTiles(id);
+    }
+  });
 }
 
 boot().catch((err) => {
