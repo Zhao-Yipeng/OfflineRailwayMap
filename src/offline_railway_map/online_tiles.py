@@ -11,9 +11,12 @@ layer (raster).
 * repeated failures -> exponential back-off from 1 to 15 minutes;
 * a server refusal ("x-blocked", 403) pauses that service for 30 minutes
   and is never cached as a tile;
-* tiles fully inside cached cells are never requested; for raster tiles the
-  parts covered by cached cells are made transparent (vector tiles are hidden
-  there by the page's mask layer instead);
+* inside cached cells the page draws their own data: their railways (at every
+  zoom: ORM raster tiles fully inside cached cells are never requested, and
+  the parts covered by cached cells are made transparent) and their offline
+  basemap from z8 (online basemap tiles inside a cached cell from z8 on are
+  not requested; below z8 the page shows the online basemap everywhere while
+  it works, so those tiles are always fetched, SPEC §7.7);
 * OpenFreeMap's tile URLs contain a weekly version: the current one is read
   from its TileJSON, which is re-read when a tile URL stops working.
 """
@@ -31,7 +34,7 @@ from typing import Callable
 
 import requests
 
-from .coverage import CellCoverage
+from .coverage import CELL_ZOOM, CellCoverage
 from .masking import TRANSPARENT_PNG, apply_mask
 from .net import Http, NetStatus
 from .paths import DataBlocked, Home
@@ -290,7 +293,7 @@ class OnlineTiles:
         if not (source.min_zoom <= z <= source.max_zoom and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
             return empty
         mask = self.coverage.tile_mask(z, x, y)
-        if mask is not None and mask.full:
+        if mask is not None and mask.full and (source.kind == "raster" or z >= CELL_ZOOM):
             return empty
         data = self._fetch(source, z, x, y)
         if data is None:
