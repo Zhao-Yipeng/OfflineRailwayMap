@@ -157,3 +157,4 @@ jobs:
           tag_name: ${{ inputs.release || github.ref_name }}
           target_commitish: ${{ github.sha }}
           name: OfflineRailwayMap ${{ inputs.release || github.ref_name }}
+          generate_release_notes: true  # the pull requests merged since the previous release
